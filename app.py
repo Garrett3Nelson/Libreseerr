@@ -140,8 +140,11 @@ def save_config():
 def load_config():
     global config
     if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE) as f:
-            config = json.load(f)
+        try:
+            with open(CONFIG_FILE) as f:
+                config = json.load(f)
+        except (json.JSONDecodeError, IOError):
+            pass
 
 
 def save_requests():
@@ -153,8 +156,11 @@ def save_requests():
 def load_requests():
     global requests_history
     if os.path.exists(REQUESTS_FILE):
-        with open(REQUESTS_FILE) as f:
-            requests_history = json.load(f)
+        try:
+            with open(REQUESTS_FILE) as f:
+                requests_history = json.load(f)
+        except (json.JSONDecodeError, IOError):
+            pass
 
 
 def save_users():
@@ -194,6 +200,14 @@ load_config()
 load_requests()
 load_users()
 init_default_admin()
+
+
+@app.before_request
+def reload_state():
+    """Reload shared state from disk so multiple Gunicorn workers stay in sync."""
+    load_config()
+    load_requests()
+    load_users()
 
 
 # ─── LDAP Auth ───
