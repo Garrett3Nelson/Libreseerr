@@ -559,7 +559,111 @@ def test_config():
         return jsonify({"error": str(e)}), 400
 
 
-# ─── Search API (Open Library) ───
+# ─── Search & Discovery API (Open Library) ───
+
+def _normalize_ol_doc(doc):
+    """Normalize a single Open Library search.json doc to our book schema."""
+    isbns = doc.get("isbn", [])
+    isbn_13 = next((i for i in isbns if len(i) == 13), "")
+    isbn_10 = next((i for i in isbns if len(i) == 10), "")
+    if not isbn_13 and not isbn_10 and isbns:
+        isbn_13 = isbns[0]
+
+    cover_i = doc.get("cover_i")
+    cover = f"https://covers.openlibrary.org/b/id/{cover_i}-M.jpg" if cover_i else ""
+
+    ol_key = doc.get("key", "")
+    ol_id = ol_key.split("/")[-1] if ol_key else ""
+
+    year = doc.get("first_publish_year")
+    published_date = str(year) if year else ""
+
+    return {
+        "id": ol_id,
+        "title": doc.get("title", "Unknown"),
+        "authors": doc.get("author_name", []),
+        "publishedDate": published_date,
+        "description": "",
+        "pageCount": doc.get("number_of_pages_median", 0),
+        "categories": doc.get("subject", [])[:5] if doc.get("subject") else [],
+        "isbn_13": isbn_13,
+        "isbn_10": isbn_10,
+        "cover": cover,
+        "language": (doc.get("language", ["en"])[0]
+                     if doc.get("language") else "en"),
+    }
+
+
+def _normalize_ol_subject_work(work):
+    """Normalize a single work from Open Library /subjects/{subject}.json."""
+    authors = [a.get("name", "") for a in work.get("authors", []) if a.get("name")]
+
+    cover_id = work.get("cover_id")
+    cover = f"https://covers.openlibrary.org/b/id/{cover_id}-M.jpg" if cover_id else ""
+
+    ol_key = work.get("key", "")
+    ol_id = ol_key.split("/")[-1] if ol_key else ""
+
+    year = work.get("first_publish_year")
+    published_date = str(year) if year else ""
+
+    return {
+        "id": ol_id,
+        "title": work.get("title", "Unknown"),
+        "authors": authors,
+        "publishedDate": published_date,
+        "description": "",
+        "pageCount": 0,
+        "categories": [],
+        "isbn_13": "",
+        "isbn_10": "",
+        "cover": cover,
+        "language": "en",
+    }
+
+
+# Category keys mapped to Open Library API details
+_DISCOVER_CATEGORIES = {
+    "new_releases":   ("search.json",  {"sort": "new", "limit": 20}),
+    "trending":       ("search.json",  {"sort": "rating", "limit": 20}),
+    "best_sellers":   ("search.json",  {"q": "subject:bestsellers", "sort": "rating", "limit": 20}),
+    "classics":       ("search.json",  {"q": "subject:classics", "sort": "rating", "limit": 20}),
+    "fiction":        ("subjects/fiction.json",          {"limit": 20}),
+    "science_fiction":("subjects/science_fiction.json",  {"limit": 20}),
+    "mystery":        ("subjects/mystery.json",          {"limit": 20}),
+    "fantasy":        ("subjects/fantasy.json",          {"limit": 20}),
+    "romance":        ("subjects/romance.json",          {"limit": 20}),
+    "nonfiction":     ("subjects/non-fiction.json",      {"limit": 20}),
+    "history":        ("subjects/history.json",          {"limit": 20}),
+}
+
+
+@app.route("/api/discover")
+@login_required
+def discover_books():
+    category = request.args.get("category", "").strip()
+    if not category or category not in _DISCOVER_CATEGORIES:
+        return jsonify({"error": "Invalid category"}), 400
+    try:
+        endpoint, params = _DISCOVER_CATEGORIES[category]
+        resp = http_requests.get(
+            f"https://openlibrary.org/{endpoint}",
+            params=params,
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        if endpoint == "search.json":
+            results = [_normalize_ol_doc(doc) for doc in data.get("docs", [])]
+        else:
+            # /subjects/ endpoint returns a "works" array
+            results = [_normalize_ol_subject_work(w) for w in data.get("works", [])]
+
+        return jsonify(results)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 
 @app.route("/api/search")
 @login_required
@@ -575,41 +679,7 @@ def search_books():
         )
         resp.raise_for_status()
         data = resp.json()
-        results = []
-        for doc in data.get("docs", []):
-            # Extract ISBNs
-            isbns = doc.get("isbn", [])
-            isbn_13 = next((i for i in isbns if len(i) == 13), "")
-            isbn_10 = next((i for i in isbns if len(i) == 10), "")
-            if not isbn_13 and not isbn_10 and isbns:
-                isbn_13 = isbns[0]
-
-            # Build cover URL from cover_i
-            cover_i = doc.get("cover_i")
-            cover = f"https://covers.openlibrary.org/b/id/{cover_i}-M.jpg" if cover_i else ""
-
-            # Build a unique ID from the Open Library key
-            ol_key = doc.get("key", "")
-            ol_id = ol_key.split("/")[-1] if ol_key else ""
-
-            # Year as string to match existing publishedDate format
-            year = doc.get("first_publish_year")
-            published_date = str(year) if year else ""
-
-            results.append({
-                "id": ol_id,
-                "title": doc.get("title", "Unknown"),
-                "authors": doc.get("author_name", []),
-                "publishedDate": published_date,
-                "description": "",
-                "pageCount": doc.get("number_of_pages_median", 0),
-                "categories": doc.get("subject", [])[:5] if doc.get("subject") else [],
-                "isbn_13": isbn_13,
-                "isbn_10": isbn_10,
-                "cover": cover,
-                "language": (doc.get("language", ["en"])[0]
-                             if doc.get("language") else "en"),
-            })
+        results = [_normalize_ol_doc(doc) for doc in data.get("docs", [])]
         return jsonify(results)
     except Exception as e:
         return jsonify({"error": str(e)}), 500

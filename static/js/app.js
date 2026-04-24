@@ -4,6 +4,20 @@ let selectedServer = "ebook";
 let currentUser = null;
 let editingUsername = null;
 
+const DISCOVERY_CATEGORIES = [
+    { key: "new_releases", title: "New Releases" },
+    { key: "trending", title: "Trending" },
+    { key: "best_sellers", title: "Best Sellers" },
+    { key: "fiction", title: "Popular Fiction" },
+    { key: "science_fiction", title: "Science Fiction" },
+    { key: "mystery", title: "Mystery & Thriller" },
+    { key: "fantasy", title: "Fantasy" },
+    { key: "romance", title: "Romance" },
+    { key: "nonfiction", title: "Non-Fiction" },
+    { key: "history", title: "History" },
+    { key: "classics", title: "Classics" },
+];
+
 // ─── Auth ───
 
 async function loadCurrentUser() {
@@ -91,6 +105,7 @@ searchInput.addEventListener("input", () => {
 
 async function doSearch() {
     const query = searchInput.value.trim();
+    const container = document.getElementById("discovery-content");
     const grid = document.getElementById("search-results");
 
     // Make sure we're on the search page
@@ -99,9 +114,13 @@ async function doSearch() {
     }
 
     if (!query) {
-        grid.innerHTML = '<div class="empty-state">Search for books by title, author, or ISBN</div>';
+        loadDiscovery();
         return;
     }
+
+    // Switch to search mode
+    container.style.display = "none";
+    grid.style.display = "";
 
     grid.innerHTML = '<div class="empty-state"><div class="spinner"></div> Searching...</div>';
 
@@ -150,6 +169,54 @@ function renderBookCard(book) {
                 ${year ? `<div class="book-year">${year}</div>` : ""}
             </div>
         </div>`;
+}
+
+function renderDiscoveryRow(category) {
+    const cards = category.books.map(renderBookCard).join("");
+    return `
+        <div class="discovery-row">
+            <div class="discovery-row-header">
+                <div class="discovery-row-title">${category.title}</div>
+            </div>
+            <div class="discovery-row-scroll">${cards}</div>
+        </div>`;
+}
+
+async function loadDiscovery() {
+    const container = document.getElementById("discovery-content");
+    const searchResults = document.getElementById("search-results");
+
+    container.style.display = "";
+    searchResults.style.display = "none";
+
+    container.innerHTML = '<div class="discovery-loading"><div class="spinner"></div> Loading discovery...</div>';
+
+    const promises = DISCOVERY_CATEGORIES.map(async (cat) => {
+        try {
+            const resp = await fetch("/api/discover?category=" + encodeURIComponent(cat.key) + "&limit=20");
+            const data = await resp.json();
+            if (data.error || !data.length) return null;
+            return { ...cat, books: data };
+        } catch {
+            return null;
+        }
+    });
+
+    const results = await Promise.all(promises);
+    const valid = results.filter(Boolean);
+
+    if (!valid.length) {
+        container.innerHTML = '<div class="empty-state">Unable to load discovery content</div>';
+        return;
+    }
+
+    container.innerHTML = valid.map(renderDiscoveryRow).join("");
+
+    container.querySelectorAll(".book-card").forEach((card) => {
+        card.addEventListener("click", () => {
+            openDownloadModal(JSON.parse(card.dataset.book));
+        });
+    });
 }
 
 // ─── Download Modal ───
@@ -654,6 +721,5 @@ window.testLDAP = async function () {
 // Load current user first, then the rest
 loadCurrentUser().then(() => {
     loadConfig();
-    document.getElementById("search-results").innerHTML =
-        '<div class="empty-state">Search for books by title, author, or ISBN</div>';
+    loadDiscovery();
 });
