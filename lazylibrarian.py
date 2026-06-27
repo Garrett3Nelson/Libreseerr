@@ -159,6 +159,11 @@ class LazyLibrarianClient:
                     }
         return None
 
+    def get_book_files(self, book_id: int) -> list:
+        """LazyLibrarian has no per-book file endpoint; completion is determined
+        via get_book_status (snatched list). Return empty for interface parity."""
+        return []
+
     def get_books(self) -> list:
         """Get all books from the LazyLibrarian library."""
         result = self._get("getBooks")

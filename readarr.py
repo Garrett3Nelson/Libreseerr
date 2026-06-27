@@ -300,6 +300,19 @@ class ReadarrClient:
         resp.raise_for_status()
         return resp.json()
 
+    def get_book_files(self, book_id: int) -> list:
+        """Return the imported files for a book.
+
+        More reliable than book.statistics.bookFileCount, which is cached and not
+        recomputed until an author refresh runs — a freshly imported file shows
+        up here immediately while the cached count can still read 0.
+        """
+        resp = self.session.get(self._url("/bookfile"), params={"bookId": book_id}, timeout=10)
+        if not resp.ok:
+            return []
+        data = resp.json()
+        return data if isinstance(data, list) else []
+
     def get_books(self) -> list:
         """Get all books from the Readarr library."""
         resp = self.session.get(self._url("/book"), timeout=30)

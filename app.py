@@ -1098,15 +1098,22 @@ def refresh_requests():
                         req["status"] = "error"
                         req["error"] = q.get("errorMessage", "Download failed")
                 else:
-                    # Check Readarr history
+                    # Not in the download queue — decide if the book is imported.
                     book_id = req.get("readarr_book_id")
                     if book_id:
+                        completed = False
                         book = client.get_book_status(book_id)
-                        if book and book.get("statistics"):
-                            stats = book["statistics"]
-                            if stats.get("bookFileCount", 0) > 0:
-                                req["status"] = "completed"
-                                req["progress"] = 100
+                        if book and book.get("statistics", {}).get("bookFileCount", 0) > 0:
+                            completed = True
+                        # statistics.bookFileCount is cached and not recomputed
+                        # until an author refresh runs, so a freshly imported
+                        # file can still read 0. The bookfile list reflects the
+                        # import immediately — treat any file as completed.
+                        if not completed and client.get_book_files(book_id):
+                            completed = True
+                        if completed:
+                            req["status"] = "completed"
+                            req["progress"] = 100
             except Exception as e:
                 pass  # Keep current status on error
         save_requests()
