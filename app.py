@@ -801,12 +801,14 @@ def _normalize_ol_subject_work(work):
     }
 
 
-# Category keys mapped to Open Library API details
+# Category keys mapped to Open Library API details.
+# language=eng on the search.json categories keeps foreign-language editions
+# (which sort=rating tends to surface) out of the results.
 _DISCOVER_CATEGORIES = {
-    "new_releases":   ("search.json",  {"sort": "new", "limit": 20}),
-    "trending":       ("search.json",  {"sort": "rating", "limit": 20}),
-    "best_sellers":   ("search.json",  {"q": "subject:bestsellers", "sort": "rating", "limit": 20}),
-    "classics":       ("search.json",  {"q": "subject:classics", "sort": "rating", "limit": 20}),
+    "new_releases":   ("search.json",  {"sort": "new", "limit": 20, "language": "eng"}),
+    "trending":       ("search.json",  {"sort": "rating", "limit": 20, "language": "eng"}),
+    "best_sellers":   ("search.json",  {"q": "subject:bestsellers", "sort": "rating", "limit": 20, "language": "eng"}),
+    "classics":       ("search.json",  {"q": "subject:classics", "sort": "rating", "limit": 20, "language": "eng"}),
     "fiction":        ("subjects/fiction.json",          {"limit": 20}),
     "science_fiction":("subjects/science_fiction.json",  {"limit": 20}),
     "mystery":        ("subjects/mystery.json",          {"limit": 20}),

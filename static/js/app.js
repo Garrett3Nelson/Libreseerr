@@ -5,6 +5,20 @@ let currentUser = null;
 let editingUsername = null;
 let cachedAvailability = null;
 
+// Inline SVG fallback cover. Self-contained (no network) so a missing/broken
+// cover can never trigger a failing request. The old fallback pointed at
+// via.placeholder.com, which is now defunct — every broken cover re-fired the
+// img onerror against a dead host in an infinite loop, thrashing the network
+// and making the Discover grid flicker. Exposed on window so the inline
+// onerror handler (which runs in global scope) can reach it.
+const NO_COVER = "data:image/svg+xml," + encodeURIComponent(
+    "<svg xmlns='http://www.w3.org/2000/svg' width='200' height='300'>" +
+    "<rect width='100%' height='100%' fill='#1f2937'/>" +
+    "<text x='50%' y='50%' fill='#ec4899' font-family='sans-serif' font-size='16' " +
+    "text-anchor='middle' dominant-baseline='middle'>No Cover</text></svg>"
+);
+window.NO_COVER = NO_COVER;
+
 const DISCOVERY_CATEGORIES = [
     { key: "new_releases", title: "New Releases" },
     { key: "trending", title: "Trending" },
@@ -154,13 +168,13 @@ function renderBookCard(book) {
     if (book.author?.images?.length) cover = book.author.images[0].url;
     if (!cover && book.images?.length) cover = book.images[0].url;
     if (!cover && book.cover) cover = book.cover;
-    if (!cover) cover = "https://via.placeholder.com/200x300/1f2937/ec4899?text=No+Cover";
+    if (!cover) cover = NO_COVER;
     const bookJson = JSON.stringify(book).replace(/"/g, "&quot;");
 
     return `
         <div class="book-card" data-book="${bookJson}">
             <img class="book-cover" src="${cover}" alt="${title}" loading="lazy"
-                 onerror="this.src='https://via.placeholder.com/200x300/1f2937/ec4899?text=No+Cover'">
+                 onerror="this.onerror=null;this.src=window.NO_COVER">
             <div class="book-overlay">
                 <div class="book-overlay-title">${title}</div>
                 <div class="book-overlay-author">${author}${year ? " (" + year + ")" : ""}</div>
@@ -251,7 +265,22 @@ async function loadDiscovery() {
     });
 
     const results = await Promise.all(promises);
-    const valid = results.filter(Boolean);
+
+    // Dedupe across rows: a popular work shows up in several categories
+    // (Best Sellers, Fiction, Fantasy…). Keep each book in the first row it
+    // appears in and drop later repeats, so the same title isn't shown 3x.
+    const seen = new Set();
+    const valid = [];
+    for (const row of results) {
+        if (!row) continue;
+        const books = row.books.filter((b) => {
+            const key = b.id || ((b.title || "").toLowerCase() + "|" + ((b.authors || [])[0] || "").toLowerCase());
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+        });
+        if (books.length) valid.push({ ...row, books });
+    }
 
     if (!valid.length) {
         container.innerHTML = '<div class="empty-state">Unable to load discovery content</div>';
