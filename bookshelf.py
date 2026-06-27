@@ -6,6 +6,12 @@ import requests
 
 logger = logging.getLogger(__name__)
 
+# Metadata lookups (book/author lookup, library listing) proxy the server's
+# upstream metadata provider and can be slow — several seconds even when idle,
+# and well over 15s while the instance is busy refreshing. Use a generous
+# timeout so a request doesn't fail mid-lookup with a read timeout.
+LOOKUP_TIMEOUT = 60
+
 
 class BookshelfClient:
     """Client for interacting with a Bookshelf instance."""
@@ -28,7 +34,7 @@ class BookshelfClient:
     def search_books(self, query: str) -> list:
         """Search for books using the Bookshelf lookup endpoint."""
         resp = self.session.get(
-            self._url("/book/lookup"), params={"term": query}, timeout=15
+            self._url("/book/lookup"), params={"term": query}, timeout=LOOKUP_TIMEOUT
         )
         resp.raise_for_status()
         return resp.json()
@@ -36,7 +42,7 @@ class BookshelfClient:
     def lookup_by_isbn(self, isbn: str) -> list:
         """Look up a book in Bookshelf by ISBN."""
         resp = self.session.get(
-            self._url("/book/lookup"), params={"term": f"isbn:{isbn}"}, timeout=15
+            self._url("/book/lookup"), params={"term": f"isbn:{isbn}"}, timeout=LOOKUP_TIMEOUT
         )
         resp.raise_for_status()
         return resp.json()
@@ -44,7 +50,7 @@ class BookshelfClient:
     def lookup_author(self, name: str) -> list:
         """Look up an author in Bookshelf by name."""
         resp = self.session.get(
-            self._url("/author/lookup"), params={"term": name}, timeout=15
+            self._url("/author/lookup"), params={"term": name}, timeout=LOOKUP_TIMEOUT
         )
         resp.raise_for_status()
         return resp.json()
@@ -90,7 +96,7 @@ class BookshelfClient:
         )
 
         # Check existing authors in Bookshelf
-        existing = self.session.get(self._url("/author"), timeout=15).json()
+        existing = self.session.get(self._url("/author"), timeout=LOOKUP_TIMEOUT).json()
 
         # Match by foreignAuthorId first (most reliable)
         if foreign_author_id:
@@ -119,7 +125,7 @@ class BookshelfClient:
             lookup = self.session.get(
                 self._url("/author/lookup"),
                 params={"term": author_name},
-                timeout=15,
+                timeout=LOOKUP_TIMEOUT,
             )
             if lookup.ok and lookup.json():
                 all_results = lookup.json()
@@ -172,7 +178,7 @@ class BookshelfClient:
             return resp.json()
 
         # Still failing — check if author was added by another process
-        updated = self.session.get(self._url("/author"), timeout=15).json()
+        updated = self.session.get(self._url("/author"), timeout=LOOKUP_TIMEOUT).json()
         match = next(
             (a for a in updated if a.get("foreignAuthorId") == foreign_author_id),
             None,
@@ -226,7 +232,7 @@ class BookshelfClient:
             return book
 
         # Fetch a fresh copy so we patch against current state.
-        resp = self.session.get(self._url(f"/book/{book_id}"), timeout=15)
+        resp = self.session.get(self._url(f"/book/{book_id}"), timeout=LOOKUP_TIMEOUT)
         if resp.ok:
             book = resp.json()
 
@@ -253,7 +259,7 @@ class BookshelfClient:
         search_resp = self.session.post(
             self._url("/command"),
             json={"name": "BookSearch", "bookIds": [book_id]},
-            timeout=15,
+            timeout=LOOKUP_TIMEOUT,
         )
         if search_resp.ok:
             logger.info("Triggered BookSearch for existing book id=%s", book_id)
@@ -281,7 +287,7 @@ class BookshelfClient:
 
         # Check if the book already exists in Bookshelf
         if foreign_book_id:
-            existing_books = self.session.get(self._url("/book"), timeout=15).json()
+            existing_books = self.session.get(self._url("/book"), timeout=LOOKUP_TIMEOUT).json()
             match = next(
                 (b for b in existing_books if b.get("foreignBookId") == foreign_book_id),
                 None,
@@ -328,7 +334,7 @@ class BookshelfClient:
         if not resp.ok:
             # The book may already exist (orphaned from a prior partial add).
             # Re-check and return the existing book.
-            existing_books = self.session.get(self._url("/book"), timeout=15).json()
+            existing_books = self.session.get(self._url("/book"), timeout=LOOKUP_TIMEOUT).json()
             match = next(
                 (b for b in existing_books if b.get("foreignBookId") == foreign_book_id),
                 None,
@@ -348,7 +354,7 @@ class BookshelfClient:
             search_resp = self.session.post(
                 self._url("/command"),
                 json={"name": "BookSearch", "bookIds": [book_id]},
-                timeout=15,
+                timeout=LOOKUP_TIMEOUT,
             )
             if search_resp.ok:
                 logger.info("Triggered BookSearch for book id=%d", book_id)
