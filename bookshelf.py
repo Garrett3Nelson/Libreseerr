@@ -188,6 +188,83 @@ class BookshelfClient:
 
         resp.raise_for_status()
 
+    def _ensure_author_monitored(self, author: dict) -> None:
+        """Ensure the author is monitored so RSS auto-grabs work for future books.
+
+        Only toggles the author-level flag via /author/editor — it does NOT
+        change monitoring of the author's individual books (verified: no
+        cascade). Author records auto-created during a metadata refresh can come
+        back unmonitored, which would block RSS sync for the requested book.
+        """
+        author_id = author.get("id")
+        if not author_id or author.get("monitored"):
+            return
+        resp = self.session.put(
+            self._url("/author/editor"),
+            json={"authorIds": [author_id], "monitored": True},
+            timeout=30,
+        )
+        if resp.ok:
+            logger.info("Set monitored=True for author id=%s", author_id)
+            author["monitored"] = True
+        else:
+            logger.warning(
+                "Failed to set monitored for author id=%s (%d): %s",
+                author_id, resp.status_code, resp.text[:200],
+            )
+
+    def _monitor_and_search(self, book: dict) -> dict:
+        """Ensure an existing book is monitored and trigger a search for it.
+
+        When Bookshelf auto-creates unmonitored edition records during the
+        author metadata refresh, the book POST returns the existing (409) record
+        without monitoring or searching it. This brings such a book up to the
+        same state as a freshly-added one: monitored=True plus a BookSearch.
+        """
+        book_id = book.get("id")
+        if not book_id:
+            return book
+
+        # Fetch a fresh copy so we patch against current state.
+        resp = self.session.get(self._url(f"/book/{book_id}"), timeout=15)
+        if resp.ok:
+            book = resp.json()
+
+        if not book.get("monitored"):
+            # Use the dedicated bulk-monitor endpoint instead of PUT /book/{id}
+            # with the full resource. Books auto-created by the author metadata
+            # refresh come back with editions=null, and the full-resource PUT
+            # then throws ArgumentNullException('source') server-side. The
+            # /book/monitor endpoint only needs the id + flag.
+            mon_resp = self.session.put(
+                self._url("/book/monitor"),
+                json={"bookIds": [book_id], "monitored": True},
+                timeout=30,
+            )
+            if mon_resp.ok:
+                logger.info("Set monitored=True for existing book id=%s", book_id)
+                book["monitored"] = True
+            else:
+                logger.warning(
+                    "Failed to set monitored for book id=%s (%d): %s",
+                    book_id, mon_resp.status_code, mon_resp.text[:200],
+                )
+
+        search_resp = self.session.post(
+            self._url("/command"),
+            json={"name": "BookSearch", "bookIds": [book_id]},
+            timeout=15,
+        )
+        if search_resp.ok:
+            logger.info("Triggered BookSearch for existing book id=%s", book_id)
+        else:
+            logger.warning(
+                "BookSearch command failed for book id=%s (%d): %s",
+                book_id, search_resp.status_code, search_resp.text[:200],
+            )
+
+        return book
+
     def add_book(self, book_data: dict, quality_profile_id: int, root_folder: str) -> dict:
         """Add a book to Bookshelf for downloading."""
         added_author = self._ensure_author(
@@ -196,6 +273,7 @@ class BookshelfClient:
             root_folder,
         )
         logger.info("Author for book '%s': %s (id=%s)", book_data.get("title"), added_author.get("authorName"), added_author.get("id"))
+        self._ensure_author_monitored(added_author)
 
         foreign_book_id = book_data.get("foreignBookId", "")
         foreign_edition_id = book_data.get("foreignEditionId", "")
@@ -210,7 +288,7 @@ class BookshelfClient:
             )
             if match:
                 logger.info("Book already exists: '%s' (id=%s)", match.get("title"), match.get("id"))
-                return match
+                return self._monitor_and_search(match)
 
         # Build the edition payload.
         edition = {
@@ -257,7 +335,7 @@ class BookshelfClient:
             )
             if match:
                 logger.info("Book already exists (after POST error): '%s' (id=%s)", match.get("title"), match.get("id"))
-                return match
+                return self._monitor_and_search(match)
 
             logger.error("POST /book failed (%d): %s", resp.status_code, resp.text[:500])
 
