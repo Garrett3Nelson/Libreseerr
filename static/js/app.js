@@ -431,7 +431,7 @@ async function loadRequests() {
 }
 
 function renderRequest(req) {
-    const cover = req.cover_url || "https://via.placeholder.com/50x75/1f2937/ec4899?text=N/A";
+    const cover = req.cover_url || NO_COVER;
     const progress = req.progress || 0;
     const fillClass = req.status === "completed" ? "complete" : req.status === "error" ? "error" : "";
 
@@ -457,7 +457,7 @@ function renderRequest(req) {
     return `
         <div class="request-item">
             <img class="request-cover" src="${cover}" alt="${req.title}"
-                 onerror="this.src='https://via.placeholder.com/50x75/1f2937/ec4899?text=N/A'">
+                 onerror="this.onerror=null;this.src=window.NO_COVER">
             <div class="request-details">
                 <div class="request-title">${req.title}</div>
                 <div class="request-meta">${req.author || ""}</div>
