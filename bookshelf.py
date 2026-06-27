@@ -1,6 +1,5 @@
 import json
 import logging
-from typing import Optional
 
 import requests
 
@@ -373,7 +372,7 @@ class BookshelfClient:
         data = resp.json()
         return data.get("records", data) if isinstance(data, dict) else data
 
-    def get_book_status(self, book_id: int) -> Optional[dict]:
+    def get_book_status(self, book_id: int) -> dict | None:
         """Get the status of a specific book."""
         resp = self.session.get(self._url(f"/book/{book_id}"), timeout=10)
         if resp.status_code == 404:

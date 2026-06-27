@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  test:
+    name: Lint & test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          # Match the Dockerfile / deploy target, not whatever runs locally.
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Ruff (lint)
+        run: ruff check .
+
+      - name: Pytest
+        run: pytest -q
+
+  docker:
+    name: Docker build & boot
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t libreseerr:ci .
+
+      - name: Run container and verify it serves
+        run: |
+          docker run -d --name libreseerr-ci -p 5000:5000 libreseerr:ci
+          # Poll the login page until the app is up (or fail after ~30s).
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:5000/login || true)
+            if [ "$code" = "200" ]; then
+              echo "App is serving (/login -> 200)"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "App did not become healthy in time. Container logs:"
+          docker logs libreseerr-ci
+          exit 1
+
+      - name: Tear down
+        if: always()
+        run: docker rm -f libreseerr-ci || true

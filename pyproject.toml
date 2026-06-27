@@ -1,0 +1,16 @@
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+exclude = ["data", "charts", "branding", "screenshots"]
+
+[tool.ruff.lint]
+# Default rules (pyflakes F + a subset of pycodestyle E) plus import sorting (I)
+# and a few common bug-catchers. Intentionally not maximal — this is a thin app
+# and the goal is signal, not noise.
+select = ["E4", "E7", "E9", "F", "I", "B", "UP"]
+ignore = [
+    "E722",  # bare except — used deliberately around optional imports/IO
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E402"]  # conftest sets env before importing app, by design

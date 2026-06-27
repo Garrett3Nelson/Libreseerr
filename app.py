@@ -4,17 +4,17 @@ import os
 import sys
 import threading
 import time
-from datetime import datetime
+from datetime import UTC, datetime
 from functools import wraps
 
 import requests as http_requests
-from flask import Flask, jsonify, render_template, request, redirect, url_for
-from flask_login import LoginManager, login_user, logout_user, login_required, current_user
+from flask import Flask, jsonify, redirect, render_template, request, url_for
+from flask_login import LoginManager, current_user, login_required, login_user, logout_user
 from werkzeug.middleware.proxy_fix import ProxyFix
-from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.security import check_password_hash, generate_password_hash
 
 try:
-    from ldap3 import Server, Connection, ALL, SUBTREE
+    from ldap3 import ALL, SUBTREE, Connection, Server
     LDAP3_AVAILABLE = True
 except ImportError:
     LDAP3_AVAILABLE = False
@@ -26,9 +26,9 @@ except ImportError:
     OIDC_AVAILABLE = False
 
 from bookshelf import BookshelfClient
-from readarr import ReadarrClient
-from lazylibrarian import LazyLibrarianClient
 from hardcover import HardcoverClient
+from lazylibrarian import LazyLibrarianClient
+from readarr import ReadarrClient
 
 app = Flask(__name__)
 
@@ -39,12 +39,20 @@ app = Flask(__name__)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 
 
+# Data directory: where config/requests/users/secret_key are persisted.
+# Overridable via LIBRESEERR_DATA_DIR (used by the test suite to redirect to a
+# tmp dir); defaults to ./data next to this file in dev and Docker.
+DATA_DIR = os.environ.get(
+    "LIBRESEERR_DATA_DIR", os.path.join(os.path.dirname(__file__), "data")
+)
+
+
 def _load_or_create_secret_key():
-    """Load secret key from env, or persist one to data/secret_key."""
+    """Load secret key from env, or persist one to the data dir."""
     env_key = os.environ.get("SECRET_KEY")
     if env_key:
         return env_key
-    key_file = os.path.join(os.path.dirname(__file__), "data", "secret_key")
+    key_file = os.path.join(DATA_DIR, "secret_key")
     if os.path.exists(key_file):
         with open(key_file) as f:
             return f.read().strip()
@@ -65,9 +73,9 @@ logging.basicConfig(
 )
 app.logger.setLevel(logging.DEBUG)
 
-CONFIG_FILE = os.path.join(os.path.dirname(__file__), "data", "config.json")
-REQUESTS_FILE = os.path.join(os.path.dirname(__file__), "data", "requests.json")
-USERS_FILE = os.path.join(os.path.dirname(__file__), "data", "users.json")
+CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
+REQUESTS_FILE = os.path.join(DATA_DIR, "requests.json")
+USERS_FILE = os.path.join(DATA_DIR, "users.json")
 
 # In-memory state
 config = {"ebook": {}, "audiobook": {}, "ldap": {}, "oidc": {}, "hardcover": {}}
@@ -141,8 +149,7 @@ def admin_required(f):
 # ─── Data Persistence ───
 
 def ensure_data_dir():
-    data_dir = os.path.join(os.path.dirname(__file__), "data")
-    os.makedirs(data_dir, exist_ok=True)
+    os.makedirs(DATA_DIR, exist_ok=True)
 
 
 def save_config():
@@ -157,7 +164,7 @@ def load_config():
         try:
             with open(CONFIG_FILE) as f:
                 config = json.load(f)
-        except (json.JSONDecodeError, IOError):
+        except (OSError, json.JSONDecodeError):
             pass
 
 
@@ -173,7 +180,7 @@ def load_requests():
         try:
             with open(REQUESTS_FILE) as f:
                 requests_history = json.load(f)
-        except (json.JSONDecodeError, IOError):
+        except (OSError, json.JSONDecodeError):
             pass
 
 
@@ -190,7 +197,7 @@ def load_users():
         try:
             with open(USERS_FILE) as f:
                 users = json.load(f)
-        except (json.JSONDecodeError, IOError):
+        except (OSError, json.JSONDecodeError):
             pass
 
 
@@ -201,7 +208,7 @@ def init_default_admin():
             "username": "admin",
             "password_hash": generate_password_hash("admin"),
             "role": "admin",
-            "created_at": datetime.utcnow().isoformat(),
+            "created_at": datetime.now(UTC).isoformat(),
         })
         save_users()
         app.logger.warning(
@@ -355,7 +362,7 @@ def api_login():
                     "username": username,
                     "password_hash": "ldap",
                     "role": ldap.get("default_role", "user"),
-                    "created_at": datetime.utcnow().isoformat(),
+                    "created_at": datetime.now(UTC).isoformat(),
                 }
                 users.append(existing)
                 save_users()
@@ -421,7 +428,7 @@ def create_user():
         "username": username,
         "password_hash": generate_password_hash(password),
         "role": role,
-        "created_at": datetime.utcnow().isoformat(),
+        "created_at": datetime.now(UTC).isoformat(),
     }
     users.append(new_user)
     save_users()
@@ -706,7 +713,7 @@ def oidc_callback():
             "password_hash": "oidc",
             "role": oidc_cfg.get("default_role", "user"),
             "auth_source": "oidc",
-            "created_at": datetime.utcnow().isoformat(),
+            "created_at": datetime.now(UTC).isoformat(),
         }
         users.append(existing)
         save_users()
@@ -1083,7 +1090,7 @@ def create_request():
         "status": "pending",
         "progress": 0,
         "error": None,
-        "created_at": datetime.utcnow().isoformat(),
+        "created_at": datetime.now(UTC).isoformat(),
     }
 
     try:

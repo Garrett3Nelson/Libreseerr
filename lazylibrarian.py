@@ -1,6 +1,4 @@
-import json
 import logging
-from typing import Optional
 
 import requests
 
@@ -144,7 +142,7 @@ class LazyLibrarianClient:
             for b in result
         ]
 
-    def get_book_status(self, book_id: int) -> Optional[dict]:
+    def get_book_status(self, book_id: int) -> dict | None:
         """Get the status of a specific book."""
         # LazyLibrarian doesn't have a direct "get book by ID" for status,
         # so we check snatched books
