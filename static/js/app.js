@@ -100,7 +100,7 @@ document.querySelectorAll(".sidebar-link").forEach((link) => {
         const pageId = "page-" + link.dataset.page;
         document.getElementById(pageId).classList.add("active");
         if (link.dataset.page === "requests") loadRequests();
-        if (link.dataset.page === "settings") loadConfig();
+        if (link.dataset.page === "settings") { loadConfig(); loadHardcover(); }
         if (link.dataset.page === "users") { loadUsers(); loadLDAP(); loadOIDC(); }
         closeSidebar();
     });
@@ -865,6 +865,69 @@ window.testOIDC = async function () {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
                 issuer_url: document.getElementById("oidc-issuer-url").value,
+            }),
+        });
+        const data = await resp.json();
+        if (data.success) {
+            statusEl.className = "status-msg success";
+            statusEl.textContent = data.message;
+        } else {
+            statusEl.className = "status-msg error";
+            statusEl.textContent = "Failed: " + data.error;
+        }
+    } catch (err) {
+        statusEl.className = "status-msg error";
+        statusEl.textContent = "Error: " + err.message;
+    }
+};
+
+// ─── Hardcover (metadata source) Configuration ───
+
+async function loadHardcover() {
+    try {
+        const resp = await fetch("/api/hardcover");
+        const data = await resp.json();
+        document.getElementById("hardcover-token").value = data.token || "";
+    } catch (err) {
+        console.error("Failed to load Hardcover config", err);
+    }
+}
+
+window.saveHardcover = async function () {
+    const statusEl = document.getElementById("hardcover-status");
+    try {
+        const resp = await fetch("/api/hardcover", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                token: document.getElementById("hardcover-token").value,
+            }),
+        });
+        const data = await resp.json();
+        if (data.error) {
+            statusEl.className = "status-msg error";
+            statusEl.textContent = data.error;
+        } else {
+            statusEl.className = "status-msg success";
+            statusEl.textContent = "Hardcover settings saved!";
+        }
+    } catch (err) {
+        statusEl.className = "status-msg error";
+        statusEl.textContent = "Error: " + err.message;
+    }
+    setTimeout(() => { statusEl.textContent = ""; }, 3000);
+};
+
+window.testHardcover = async function () {
+    const statusEl = document.getElementById("hardcover-status");
+    statusEl.className = "status-msg";
+    statusEl.textContent = "Testing...";
+    try {
+        const resp = await fetch("/api/hardcover/test", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                token: document.getElementById("hardcover-token").value,
             }),
         });
         const data = await resp.json();

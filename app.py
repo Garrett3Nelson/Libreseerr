@@ -28,6 +28,7 @@ except ImportError:
 from bookshelf import BookshelfClient
 from readarr import ReadarrClient
 from lazylibrarian import LazyLibrarianClient
+from hardcover import HardcoverClient
 
 app = Flask(__name__)
 
@@ -69,7 +70,7 @@ REQUESTS_FILE = os.path.join(os.path.dirname(__file__), "data", "requests.json")
 USERS_FILE = os.path.join(os.path.dirname(__file__), "data", "users.json")
 
 # In-memory state
-config = {"ebook": {}, "audiobook": {}, "ldap": {}, "oidc": {}}
+config = {"ebook": {}, "audiobook": {}, "ldap": {}, "oidc": {}, "hardcover": {}}
 requests_history = []
 users = []
 lock = threading.Lock()
@@ -294,6 +295,19 @@ def get_client(server_type: str) -> ReadarrClient | BookshelfClient | LazyLibrar
         if server.get("server_software") == "lazylibrarian":
             return LazyLibrarianClient(server["url"], server["api_key"])
         return ReadarrClient(server["url"], server["api_key"])
+    return None
+
+
+def get_metadata_client() -> HardcoverClient | None:
+    """Return a Hardcover client when a token is configured, else None.
+
+    A configured token is the switch: when present, Hardcover replaces Open
+    Library for search and discovery. When absent, callers fall back to the
+    Open Library code paths.
+    """
+    token = config.get("hardcover", {}).get("token")
+    if token:
+        return HardcoverClient(token)
     return None
 
 
@@ -597,6 +611,47 @@ def test_oidc():
         return jsonify({"error": str(e)}), 400
 
 
+# ─── Hardcover (metadata source) Config API ───
+
+@app.route("/api/hardcover", methods=["GET"])
+@admin_required
+def get_hardcover():
+    hc = config.get("hardcover", {})
+    token = hc.get("token", "")
+    return jsonify({
+        "configured": bool(token),
+        "token": token,
+    })
+
+
+@app.route("/api/hardcover", methods=["POST"])
+@admin_required
+def update_hardcover():
+    data = request.json
+    config["hardcover"] = {
+        "token": data.get("token", "").strip(),
+    }
+    save_config()
+    return jsonify({"success": True})
+
+
+@app.route("/api/hardcover/test", methods=["POST"])
+@admin_required
+def test_hardcover():
+    data = request.json
+    token = data.get("token", "").strip()
+    if not token:
+        return jsonify({"error": "token is required"}), 400
+    try:
+        result = HardcoverClient(token).test_connection()
+        username = result.get("username")
+        if not username:
+            return jsonify({"error": "Token accepted but no user returned"}), 400
+        return jsonify({"success": True, "message": f"Connected as {username}"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+
 # ─── OIDC Auth Flow ───
 
 @app.route("/api/auth/oidc/login")
@@ -819,28 +874,49 @@ _DISCOVER_CATEGORIES = {
 }
 
 
+# Short-lived cache for discover rows, keyed by (source, category). Discovery
+# content barely changes minute-to-minute; caching cuts latency and keeps us
+# well under Hardcover's 60 req/min limit (a page load fans out 11 categories).
+_DISCOVER_CACHE_TTL = 300  # seconds
+_discover_cache = {}
+
+
+def _discover_from_openlibrary(category):
+    endpoint, params = _DISCOVER_CATEGORIES[category]
+    resp = http_requests.get(
+        f"https://openlibrary.org/{endpoint}",
+        params=params,
+        timeout=10,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if endpoint == "search.json":
+        return [_normalize_ol_doc(doc) for doc in data.get("docs", [])]
+    # /subjects/ endpoint returns a "works" array
+    return [_normalize_ol_subject_work(w) for w in data.get("works", [])]
+
+
 @app.route("/api/discover")
 @login_required
 def discover_books():
     category = request.args.get("category", "").strip()
     if not category or category not in _DISCOVER_CATEGORIES:
         return jsonify({"error": "Invalid category"}), 400
+
+    metadata_client = get_metadata_client()
+    source = "hardcover" if metadata_client else "openlibrary"
+
+    cache_key = (source, category)
+    cached = _discover_cache.get(cache_key)
+    if cached and (time.time() - cached[0]) < _DISCOVER_CACHE_TTL:
+        return jsonify(cached[1])
+
     try:
-        endpoint, params = _DISCOVER_CATEGORIES[category]
-        resp = http_requests.get(
-            f"https://openlibrary.org/{endpoint}",
-            params=params,
-            timeout=10,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-
-        if endpoint == "search.json":
-            results = [_normalize_ol_doc(doc) for doc in data.get("docs", [])]
+        if metadata_client:
+            results = metadata_client.discover(category)
         else:
-            # /subjects/ endpoint returns a "works" array
-            results = [_normalize_ol_subject_work(w) for w in data.get("works", [])]
-
+            results = _discover_from_openlibrary(category)
+        _discover_cache[cache_key] = (time.time(), results)
         return jsonify(results)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -853,6 +929,9 @@ def search_books():
     if not query:
         return jsonify([])
     try:
+        metadata_client = get_metadata_client()
+        if metadata_client:
+            return jsonify(metadata_client.search_books(query))
         resp = http_requests.get(
             "https://openlibrary.org/search.json",
             params={"q": query, "limit": 20},
