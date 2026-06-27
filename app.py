@@ -1148,18 +1148,32 @@ def refresh_requests():
     """Refresh the status of all processing/downloading requests."""
     with lock:
         for req in requests_history:
-            if req["status"] in ("completed", "error"):
+            # "completed" is terminal. Everything else — including a prior
+            # transient "error" (e.g. a stalled torrent) — is re-evaluated so it
+            # can recover once the file actually imports.
+            if req["status"] == "completed":
                 continue
             client = get_client(req["server_type"])
             if not client:
                 continue
             try:
+                book_id = req.get("readarr_book_id")
+
+                # Authoritative: an imported file means the request is done,
+                # regardless of a stalled/seeding queue entry or a prior error.
+                # (bookfile listing reflects imports immediately, unlike the
+                # cached statistics.bookFileCount.)
+                if book_id and client.get_book_files(book_id):
+                    req["status"] = "completed"
+                    req["progress"] = 100
+                    req["error"] = None
+                    continue
+
                 queue = client.get_queue()
-                req_book_id = req.get("readarr_book_id")
                 matching = [
                     q for q in queue
                     if q.get("title", "").lower() == req["title"].lower()
-                    or (req_book_id and str(q.get("bookId")) == str(req_book_id))
+                    or (book_id and str(q.get("bookId")) == str(book_id))
                 ]
                 if matching:
                     q = matching[0]
@@ -1168,6 +1182,7 @@ def refresh_requests():
                     size_left = q.get("sizeleft", 0)
                     # Book is in the download queue
                     req["status"] = "downloading"
+                    req["error"] = None
                     if size > 0:
                         req["progress"] = round((1 - size_left / size) * 100)
                     if status == "completed":
@@ -1175,25 +1190,16 @@ def refresh_requests():
                         req["progress"] = 100
                     elif status in ("failed", "warning"):
                         req["status"] = "error"
-                        req["error"] = q.get("errorMessage", "Download failed")
-                else:
-                    # Not in the download queue — decide if the book is imported.
-                    book_id = req.get("readarr_book_id")
-                    if book_id:
-                        completed = False
-                        book = client.get_book_status(book_id)
-                        if book and book.get("statistics", {}).get("bookFileCount", 0) > 0:
-                            completed = True
-                        # statistics.bookFileCount is cached and not recomputed
-                        # until an author refresh runs, so a freshly imported
-                        # file can still read 0. The bookfile list reflects the
-                        # import immediately — treat any file as completed.
-                        if not completed and client.get_book_files(book_id):
-                            completed = True
-                        if completed:
-                            req["status"] = "completed"
-                            req["progress"] = 100
-            except Exception as e:
+                        req["error"] = q.get("errorMessage") or "Download failed"
+                elif book_id:
+                    # Not in the queue and no file found above; fall back to the
+                    # cached statistic in case the bookfile listing was empty.
+                    book = client.get_book_status(book_id)
+                    if book and book.get("statistics", {}).get("bookFileCount", 0) > 0:
+                        req["status"] = "completed"
+                        req["progress"] = 100
+                        req["error"] = None
+            except Exception:
                 pass  # Keep current status on error
         save_requests()
     return jsonify(requests_history)
