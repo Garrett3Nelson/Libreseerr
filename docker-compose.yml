@@ -1,12 +1,13 @@
 services:
   libreseerr:
     build: .
-    platform: linux/amd64
+    container_name: libreseerr
     ports:
-      - "5000:5000"
+      - '${PORT:-5000}:5000'
     volumes:
-      - libreseerr-data:/app/data
+      - '/opt/appdata/libreseerr:/app/data'
+    environment:
+      # Leave SECRET_KEY blank to have the app auto-generate and persist one
+      # to /app/data/secret_key on first run (see _load_or_create_secret_key).
+      - SECRET_KEY=${SECRET_KEY:-}
     restart: unless-stopped
-
-volumes:
-  libreseerr-data:
