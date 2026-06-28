@@ -10,10 +10,10 @@ jobs:
     name: Lint & test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           # Match the Dockerfile / deploy target, not whatever runs locally.
           python-version: "3.12"
@@ -26,13 +26,13 @@ jobs:
         run: ruff check .
 
       - name: Pytest
-        run: pytest -q
+        run: pytest -v -rA
 
   docker:
     name: Docker build & boot
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Build image
         run: docker build -t libreseerr:ci .

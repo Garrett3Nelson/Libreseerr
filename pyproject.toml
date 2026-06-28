@@ -1,3 +1,9 @@
+[tool.pytest.ini_options]
+# app.py and the client modules live at the repo root, while conftest.py lives
+# in tests/. Put the root on sys.path so `import app` works whether pytest is
+# run as `pytest` (console script) or `python -m pytest`.
+pythonpath = ["."]
+
 [tool.ruff]
 target-version = "py312"
 line-length = 100
