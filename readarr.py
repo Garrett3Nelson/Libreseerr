@@ -1,10 +1,15 @@
 import json
 import logging
-from typing import Optional
 
 import requests
 
 logger = logging.getLogger(__name__)
+
+# Metadata lookups (book/author lookup, library listing) proxy the server's
+# upstream metadata provider and can be slow — several seconds even when idle,
+# and well over 15s while the instance is busy refreshing. Use a generous
+# timeout so a request doesn't fail mid-lookup with a read timeout.
+LOOKUP_TIMEOUT = 60
 
 
 class ReadarrClient:
@@ -28,7 +33,7 @@ class ReadarrClient:
     def search_books(self, query: str) -> list:
         """Search for books using the Readarr lookup endpoint."""
         resp = self.session.get(
-            self._url("/book/lookup"), params={"term": query}, timeout=15
+            self._url("/book/lookup"), params={"term": query}, timeout=LOOKUP_TIMEOUT
         )
         resp.raise_for_status()
         return resp.json()
@@ -36,7 +41,7 @@ class ReadarrClient:
     def lookup_by_isbn(self, isbn: str) -> list:
         """Look up a book in Readarr by ISBN."""
         resp = self.session.get(
-            self._url("/book/lookup"), params={"term": f"isbn:{isbn}"}, timeout=15
+            self._url("/book/lookup"), params={"term": f"isbn:{isbn}"}, timeout=LOOKUP_TIMEOUT
         )
         resp.raise_for_status()
         return resp.json()
@@ -44,7 +49,7 @@ class ReadarrClient:
     def lookup_author(self, name: str) -> list:
         """Look up an author in Readarr by name."""
         resp = self.session.get(
-            self._url("/author/lookup"), params={"term": name}, timeout=15
+            self._url("/author/lookup"), params={"term": name}, timeout=LOOKUP_TIMEOUT
         )
         resp.raise_for_status()
         return resp.json()
@@ -90,7 +95,7 @@ class ReadarrClient:
         )
 
         # Check existing authors in Readarr
-        existing = self.session.get(self._url("/author"), timeout=15).json()
+        existing = self.session.get(self._url("/author"), timeout=LOOKUP_TIMEOUT).json()
 
         # Match by foreignAuthorId first (most reliable)
         if foreign_author_id:
@@ -119,7 +124,7 @@ class ReadarrClient:
             lookup = self.session.get(
                 self._url("/author/lookup"),
                 params={"term": author_name},
-                timeout=15,
+                timeout=LOOKUP_TIMEOUT,
             )
             if lookup.ok and lookup.json():
                 all_results = lookup.json()
@@ -172,7 +177,7 @@ class ReadarrClient:
             return resp.json()
 
         # Still failing — check if author was added by another process
-        updated = self.session.get(self._url("/author"), timeout=15).json()
+        updated = self.session.get(self._url("/author"), timeout=LOOKUP_TIMEOUT).json()
         match = next(
             (a for a in updated if a.get("foreignAuthorId") == foreign_author_id),
             None,
@@ -203,7 +208,7 @@ class ReadarrClient:
 
         # Check if the book already exists in Readarr
         if foreign_book_id:
-            existing_books = self.session.get(self._url("/book"), timeout=15).json()
+            existing_books = self.session.get(self._url("/book"), timeout=LOOKUP_TIMEOUT).json()
             match = next(
                 (b for b in existing_books if b.get("foreignBookId") == foreign_book_id),
                 None,
@@ -253,7 +258,7 @@ class ReadarrClient:
         if not resp.ok:
             # The book may already exist (orphaned from a prior partial add).
             # Re-check and return the existing book.
-            existing_books = self.session.get(self._url("/book"), timeout=15).json()
+            existing_books = self.session.get(self._url("/book"), timeout=LOOKUP_TIMEOUT).json()
             match = next(
                 (b for b in existing_books if b.get("foreignBookId") == foreign_book_id),
                 None,
@@ -273,7 +278,7 @@ class ReadarrClient:
             search_resp = self.session.post(
                 self._url("/command"),
                 json={"name": "BookSearch", "bookIds": [book_id]},
-                timeout=15,
+                timeout=LOOKUP_TIMEOUT,
             )
             if search_resp.ok:
                 logger.info("Triggered BookSearch for book id=%d", book_id)
@@ -292,13 +297,26 @@ class ReadarrClient:
         data = resp.json()
         return data.get("records", data) if isinstance(data, dict) else data
 
-    def get_book_status(self, book_id: int) -> Optional[dict]:
+    def get_book_status(self, book_id: int) -> dict | None:
         """Get the status of a specific book."""
         resp = self.session.get(self._url(f"/book/{book_id}"), timeout=10)
         if resp.status_code == 404:
             return None
         resp.raise_for_status()
         return resp.json()
+
+    def get_book_files(self, book_id: int) -> list:
+        """Return the imported files for a book.
+
+        More reliable than book.statistics.bookFileCount, which is cached and not
+        recomputed until an author refresh runs — a freshly imported file shows
+        up here immediately while the cached count can still read 0.
+        """
+        resp = self.session.get(self._url("/bookfile"), params={"bookId": book_id}, timeout=10)
+        if not resp.ok:
+            return []
+        data = resp.json()
+        return data if isinstance(data, list) else []
 
     def get_books(self) -> list:
         """Get all books from the Readarr library."""

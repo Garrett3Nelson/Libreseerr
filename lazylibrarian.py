@@ -1,6 +1,4 @@
-import json
 import logging
-from typing import Optional
 
 import requests
 
@@ -144,7 +142,7 @@ class LazyLibrarianClient:
             for b in result
         ]
 
-    def get_book_status(self, book_id: int) -> Optional[dict]:
+    def get_book_status(self, book_id: int) -> dict | None:
         """Get the status of a specific book."""
         # LazyLibrarian doesn't have a direct "get book by ID" for status,
         # so we check snatched books
@@ -158,6 +156,11 @@ class LazyLibrarianClient:
                         "statistics": {"bookFileCount": 1},
                     }
         return None
+
+    def get_book_files(self, book_id: int) -> list:
+        """LazyLibrarian has no per-book file endpoint; completion is determined
+        via get_book_status (snatched list). Return empty for interface parity."""
+        return []
 
     def get_books(self) -> list:
         """Get all books from the LazyLibrarian library."""

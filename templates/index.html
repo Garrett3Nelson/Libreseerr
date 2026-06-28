@@ -145,6 +145,25 @@
                         <div id="audiobook-status" class="status-msg"></div>
                     </div>
                 </div>
+
+                <h2 style="margin-top: 2rem;">Metadata Source</h2>
+                <div class="settings-card">
+                    <h3>Hardcover (optional)</h3>
+                    <p class="status-msg" style="margin-bottom: 0.75rem;">
+                        Add a <a href="https://hardcover.app/account/api" target="_blank" rel="noreferrer noopener">Hardcover API token</a>
+                        to use Hardcover for search and discovery instead of Open Library.
+                        Leave blank to keep using Open Library.
+                    </p>
+                    <div class="form-group">
+                        <label for="hardcover-token">API Token</label>
+                        <input type="password" id="hardcover-token" placeholder="Bearer eyJ...">
+                    </div>
+                    <div class="btn-group">
+                        <button class="btn btn-secondary" onclick="testHardcover()">Test</button>
+                        <button class="btn btn-primary" onclick="saveHardcover()">Save</button>
+                    </div>
+                    <div id="hardcover-status" class="status-msg"></div>
+                </div>
             </div>
 
             <!-- Users Page -->

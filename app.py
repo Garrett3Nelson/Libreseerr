@@ -4,17 +4,17 @@ import os
 import sys
 import threading
 import time
-from datetime import datetime
+from datetime import UTC, datetime
 from functools import wraps
 
 import requests as http_requests
-from flask import Flask, jsonify, render_template, request, redirect, url_for
-from flask_login import LoginManager, login_user, logout_user, login_required, current_user
+from flask import Flask, jsonify, redirect, render_template, request, url_for
+from flask_login import LoginManager, current_user, login_required, login_user, logout_user
 from werkzeug.middleware.proxy_fix import ProxyFix
-from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.security import check_password_hash, generate_password_hash
 
 try:
-    from ldap3 import Server, Connection, ALL, SUBTREE
+    from ldap3 import ALL, SUBTREE, Connection, Server
     LDAP3_AVAILABLE = True
 except ImportError:
     LDAP3_AVAILABLE = False
@@ -26,8 +26,9 @@ except ImportError:
     OIDC_AVAILABLE = False
 
 from bookshelf import BookshelfClient
-from readarr import ReadarrClient
+from hardcover import HardcoverClient
 from lazylibrarian import LazyLibrarianClient
+from readarr import ReadarrClient
 
 app = Flask(__name__)
 
@@ -38,12 +39,20 @@ app = Flask(__name__)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 
 
+# Data directory: where config/requests/users/secret_key are persisted.
+# Overridable via LIBRESEERR_DATA_DIR (used by the test suite to redirect to a
+# tmp dir); defaults to ./data next to this file in dev and Docker.
+DATA_DIR = os.environ.get(
+    "LIBRESEERR_DATA_DIR", os.path.join(os.path.dirname(__file__), "data")
+)
+
+
 def _load_or_create_secret_key():
-    """Load secret key from env, or persist one to data/secret_key."""
+    """Load secret key from env, or persist one to the data dir."""
     env_key = os.environ.get("SECRET_KEY")
     if env_key:
         return env_key
-    key_file = os.path.join(os.path.dirname(__file__), "data", "secret_key")
+    key_file = os.path.join(DATA_DIR, "secret_key")
     if os.path.exists(key_file):
         with open(key_file) as f:
             return f.read().strip()
@@ -64,12 +73,12 @@ logging.basicConfig(
 )
 app.logger.setLevel(logging.DEBUG)
 
-CONFIG_FILE = os.path.join(os.path.dirname(__file__), "data", "config.json")
-REQUESTS_FILE = os.path.join(os.path.dirname(__file__), "data", "requests.json")
-USERS_FILE = os.path.join(os.path.dirname(__file__), "data", "users.json")
+CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
+REQUESTS_FILE = os.path.join(DATA_DIR, "requests.json")
+USERS_FILE = os.path.join(DATA_DIR, "users.json")
 
 # In-memory state
-config = {"ebook": {}, "audiobook": {}, "ldap": {}, "oidc": {}}
+config = {"ebook": {}, "audiobook": {}, "ldap": {}, "oidc": {}, "hardcover": {}}
 requests_history = []
 users = []
 lock = threading.Lock()
@@ -140,8 +149,7 @@ def admin_required(f):
 # ─── Data Persistence ───
 
 def ensure_data_dir():
-    data_dir = os.path.join(os.path.dirname(__file__), "data")
-    os.makedirs(data_dir, exist_ok=True)
+    os.makedirs(DATA_DIR, exist_ok=True)
 
 
 def save_config():
@@ -156,7 +164,7 @@ def load_config():
         try:
             with open(CONFIG_FILE) as f:
                 config = json.load(f)
-        except (json.JSONDecodeError, IOError):
+        except (OSError, json.JSONDecodeError):
             pass
 
 
@@ -172,7 +180,7 @@ def load_requests():
         try:
             with open(REQUESTS_FILE) as f:
                 requests_history = json.load(f)
-        except (json.JSONDecodeError, IOError):
+        except (OSError, json.JSONDecodeError):
             pass
 
 
@@ -189,7 +197,7 @@ def load_users():
         try:
             with open(USERS_FILE) as f:
                 users = json.load(f)
-        except (json.JSONDecodeError, IOError):
+        except (OSError, json.JSONDecodeError):
             pass
 
 
@@ -200,7 +208,7 @@ def init_default_admin():
             "username": "admin",
             "password_hash": generate_password_hash("admin"),
             "role": "admin",
-            "created_at": datetime.utcnow().isoformat(),
+            "created_at": datetime.now(UTC).isoformat(),
         })
         save_users()
         app.logger.warning(
@@ -297,6 +305,19 @@ def get_client(server_type: str) -> ReadarrClient | BookshelfClient | LazyLibrar
     return None
 
 
+def get_metadata_client() -> HardcoverClient | None:
+    """Return a Hardcover client when a token is configured, else None.
+
+    A configured token is the switch: when present, Hardcover replaces Open
+    Library for search and discovery. When absent, callers fall back to the
+    Open Library code paths.
+    """
+    token = config.get("hardcover", {}).get("token")
+    if token:
+        return HardcoverClient(token)
+    return None
+
+
 # ─── Pages ───
 
 @app.route("/")
@@ -341,7 +362,7 @@ def api_login():
                     "username": username,
                     "password_hash": "ldap",
                     "role": ldap.get("default_role", "user"),
-                    "created_at": datetime.utcnow().isoformat(),
+                    "created_at": datetime.now(UTC).isoformat(),
                 }
                 users.append(existing)
                 save_users()
@@ -407,7 +428,7 @@ def create_user():
         "username": username,
         "password_hash": generate_password_hash(password),
         "role": role,
-        "created_at": datetime.utcnow().isoformat(),
+        "created_at": datetime.now(UTC).isoformat(),
     }
     users.append(new_user)
     save_users()
@@ -597,6 +618,47 @@ def test_oidc():
         return jsonify({"error": str(e)}), 400
 
 
+# ─── Hardcover (metadata source) Config API ───
+
+@app.route("/api/hardcover", methods=["GET"])
+@admin_required
+def get_hardcover():
+    hc = config.get("hardcover", {})
+    token = hc.get("token", "")
+    return jsonify({
+        "configured": bool(token),
+        "token": token,
+    })
+
+
+@app.route("/api/hardcover", methods=["POST"])
+@admin_required
+def update_hardcover():
+    data = request.json
+    config["hardcover"] = {
+        "token": data.get("token", "").strip(),
+    }
+    save_config()
+    return jsonify({"success": True})
+
+
+@app.route("/api/hardcover/test", methods=["POST"])
+@admin_required
+def test_hardcover():
+    data = request.json
+    token = data.get("token", "").strip()
+    if not token:
+        return jsonify({"error": "token is required"}), 400
+    try:
+        result = HardcoverClient(token).test_connection()
+        username = result.get("username")
+        if not username:
+            return jsonify({"error": "Token accepted but no user returned"}), 400
+        return jsonify({"success": True, "message": f"Connected as {username}"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+
 # ─── OIDC Auth Flow ───
 
 @app.route("/api/auth/oidc/login")
@@ -651,7 +713,7 @@ def oidc_callback():
             "password_hash": "oidc",
             "role": oidc_cfg.get("default_role", "user"),
             "auth_source": "oidc",
-            "created_at": datetime.utcnow().isoformat(),
+            "created_at": datetime.now(UTC).isoformat(),
         }
         users.append(existing)
         save_users()
@@ -801,12 +863,14 @@ def _normalize_ol_subject_work(work):
     }
 
 
-# Category keys mapped to Open Library API details
+# Category keys mapped to Open Library API details.
+# language=eng on the search.json categories keeps foreign-language editions
+# (which sort=rating tends to surface) out of the results.
 _DISCOVER_CATEGORIES = {
-    "new_releases":   ("search.json",  {"sort": "new", "limit": 20}),
-    "trending":       ("search.json",  {"sort": "rating", "limit": 20}),
-    "best_sellers":   ("search.json",  {"q": "subject:bestsellers", "sort": "rating", "limit": 20}),
-    "classics":       ("search.json",  {"q": "subject:classics", "sort": "rating", "limit": 20}),
+    "new_releases":   ("search.json",  {"sort": "new", "limit": 20, "language": "eng"}),
+    "trending":       ("search.json",  {"sort": "rating", "limit": 20, "language": "eng"}),
+    "best_sellers":   ("search.json",  {"q": "subject:bestsellers", "sort": "rating", "limit": 20, "language": "eng"}),
+    "classics":       ("search.json",  {"q": "subject:classics", "sort": "rating", "limit": 20, "language": "eng"}),
     "fiction":        ("subjects/fiction.json",          {"limit": 20}),
     "science_fiction":("subjects/science_fiction.json",  {"limit": 20}),
     "mystery":        ("subjects/mystery.json",          {"limit": 20}),
@@ -817,28 +881,49 @@ _DISCOVER_CATEGORIES = {
 }
 
 
+# Short-lived cache for discover rows, keyed by (source, category). Discovery
+# content barely changes minute-to-minute; caching cuts latency and keeps us
+# well under Hardcover's 60 req/min limit (a page load fans out 11 categories).
+_DISCOVER_CACHE_TTL = 300  # seconds
+_discover_cache = {}
+
+
+def _discover_from_openlibrary(category):
+    endpoint, params = _DISCOVER_CATEGORIES[category]
+    resp = http_requests.get(
+        f"https://openlibrary.org/{endpoint}",
+        params=params,
+        timeout=10,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if endpoint == "search.json":
+        return [_normalize_ol_doc(doc) for doc in data.get("docs", [])]
+    # /subjects/ endpoint returns a "works" array
+    return [_normalize_ol_subject_work(w) for w in data.get("works", [])]
+
+
 @app.route("/api/discover")
 @login_required
 def discover_books():
     category = request.args.get("category", "").strip()
     if not category or category not in _DISCOVER_CATEGORIES:
         return jsonify({"error": "Invalid category"}), 400
+
+    metadata_client = get_metadata_client()
+    source = "hardcover" if metadata_client else "openlibrary"
+
+    cache_key = (source, category)
+    cached = _discover_cache.get(cache_key)
+    if cached and (time.time() - cached[0]) < _DISCOVER_CACHE_TTL:
+        return jsonify(cached[1])
+
     try:
-        endpoint, params = _DISCOVER_CATEGORIES[category]
-        resp = http_requests.get(
-            f"https://openlibrary.org/{endpoint}",
-            params=params,
-            timeout=10,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-
-        if endpoint == "search.json":
-            results = [_normalize_ol_doc(doc) for doc in data.get("docs", [])]
+        if metadata_client:
+            results = metadata_client.discover(category)
         else:
-            # /subjects/ endpoint returns a "works" array
-            results = [_normalize_ol_subject_work(w) for w in data.get("works", [])]
-
+            results = _discover_from_openlibrary(category)
+        _discover_cache[cache_key] = (time.time(), results)
         return jsonify(results)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -851,6 +936,9 @@ def search_books():
     if not query:
         return jsonify([])
     try:
+        metadata_client = get_metadata_client()
+        if metadata_client:
+            return jsonify(metadata_client.search_books(query))
         resp = http_requests.get(
             "https://openlibrary.org/search.json",
             params={"q": query, "limit": 20},
@@ -1002,7 +1090,7 @@ def create_request():
         "status": "pending",
         "progress": 0,
         "error": None,
-        "created_at": datetime.utcnow().isoformat(),
+        "created_at": datetime.now(UTC).isoformat(),
     }
 
     try:
@@ -1067,18 +1155,32 @@ def refresh_requests():
     """Refresh the status of all processing/downloading requests."""
     with lock:
         for req in requests_history:
-            if req["status"] in ("completed", "error"):
+            # "completed" is terminal. Everything else — including a prior
+            # transient "error" (e.g. a stalled torrent) — is re-evaluated so it
+            # can recover once the file actually imports.
+            if req["status"] == "completed":
                 continue
             client = get_client(req["server_type"])
             if not client:
                 continue
             try:
+                book_id = req.get("readarr_book_id")
+
+                # Authoritative: an imported file means the request is done,
+                # regardless of a stalled/seeding queue entry or a prior error.
+                # (bookfile listing reflects imports immediately, unlike the
+                # cached statistics.bookFileCount.)
+                if book_id and client.get_book_files(book_id):
+                    req["status"] = "completed"
+                    req["progress"] = 100
+                    req["error"] = None
+                    continue
+
                 queue = client.get_queue()
-                req_book_id = req.get("readarr_book_id")
                 matching = [
                     q for q in queue
                     if q.get("title", "").lower() == req["title"].lower()
-                    or (req_book_id and str(q.get("bookId")) == str(req_book_id))
+                    or (book_id and str(q.get("bookId")) == str(book_id))
                 ]
                 if matching:
                     q = matching[0]
@@ -1087,6 +1189,7 @@ def refresh_requests():
                     size_left = q.get("sizeleft", 0)
                     # Book is in the download queue
                     req["status"] = "downloading"
+                    req["error"] = None
                     if size > 0:
                         req["progress"] = round((1 - size_left / size) * 100)
                     if status == "completed":
@@ -1094,18 +1197,16 @@ def refresh_requests():
                         req["progress"] = 100
                     elif status in ("failed", "warning"):
                         req["status"] = "error"
-                        req["error"] = q.get("errorMessage", "Download failed")
-                else:
-                    # Check Readarr history
-                    book_id = req.get("readarr_book_id")
-                    if book_id:
-                        book = client.get_book_status(book_id)
-                        if book and book.get("statistics"):
-                            stats = book["statistics"]
-                            if stats.get("bookFileCount", 0) > 0:
-                                req["status"] = "completed"
-                                req["progress"] = 100
-            except Exception as e:
+                        req["error"] = q.get("errorMessage") or "Download failed"
+                elif book_id:
+                    # Not in the queue and no file found above; fall back to the
+                    # cached statistic in case the bookfile listing was empty.
+                    book = client.get_book_status(book_id)
+                    if book and book.get("statistics", {}).get("bookFileCount", 0) > 0:
+                        req["status"] = "completed"
+                        req["progress"] = 100
+                        req["error"] = None
+            except Exception:
                 pass  # Keep current status on error
         save_requests()
     return jsonify(requests_history)

@@ -5,6 +5,20 @@ let currentUser = null;
 let editingUsername = null;
 let cachedAvailability = null;
 
+// Inline SVG fallback cover. Self-contained (no network) so a missing/broken
+// cover can never trigger a failing request. The old fallback pointed at
+// via.placeholder.com, which is now defunct — every broken cover re-fired the
+// img onerror against a dead host in an infinite loop, thrashing the network
+// and making the Discover grid flicker. Exposed on window so the inline
+// onerror handler (which runs in global scope) can reach it.
+const NO_COVER = "data:image/svg+xml," + encodeURIComponent(
+    "<svg xmlns='http://www.w3.org/2000/svg' width='200' height='300'>" +
+    "<rect width='100%' height='100%' fill='#1f2937'/>" +
+    "<text x='50%' y='50%' fill='#ec4899' font-family='sans-serif' font-size='16' " +
+    "text-anchor='middle' dominant-baseline='middle'>No Cover</text></svg>"
+);
+window.NO_COVER = NO_COVER;
+
 const DISCOVERY_CATEGORIES = [
     { key: "new_releases", title: "New Releases" },
     { key: "trending", title: "Trending" },
@@ -86,7 +100,7 @@ document.querySelectorAll(".sidebar-link").forEach((link) => {
         const pageId = "page-" + link.dataset.page;
         document.getElementById(pageId).classList.add("active");
         if (link.dataset.page === "requests") loadRequests();
-        if (link.dataset.page === "settings") loadConfig();
+        if (link.dataset.page === "settings") { loadConfig(); loadHardcover(); }
         if (link.dataset.page === "users") { loadUsers(); loadLDAP(); loadOIDC(); }
         closeSidebar();
     });
@@ -154,13 +168,13 @@ function renderBookCard(book) {
     if (book.author?.images?.length) cover = book.author.images[0].url;
     if (!cover && book.images?.length) cover = book.images[0].url;
     if (!cover && book.cover) cover = book.cover;
-    if (!cover) cover = "https://via.placeholder.com/200x300/1f2937/ec4899?text=No+Cover";
+    if (!cover) cover = NO_COVER;
     const bookJson = JSON.stringify(book).replace(/"/g, "&quot;");
 
     return `
         <div class="book-card" data-book="${bookJson}">
             <img class="book-cover" src="${cover}" alt="${title}" loading="lazy"
-                 onerror="this.src='https://via.placeholder.com/200x300/1f2937/ec4899?text=No+Cover'">
+                 onerror="this.onerror=null;this.src=window.NO_COVER">
             <div class="book-overlay">
                 <div class="book-overlay-title">${title}</div>
                 <div class="book-overlay-author">${author}${year ? " (" + year + ")" : ""}</div>
@@ -251,7 +265,22 @@ async function loadDiscovery() {
     });
 
     const results = await Promise.all(promises);
-    const valid = results.filter(Boolean);
+
+    // Dedupe across rows: a popular work shows up in several categories
+    // (Best Sellers, Fiction, Fantasy…). Keep each book in the first row it
+    // appears in and drop later repeats, so the same title isn't shown 3x.
+    const seen = new Set();
+    const valid = [];
+    for (const row of results) {
+        if (!row) continue;
+        const books = row.books.filter((b) => {
+            const key = b.id || ((b.title || "").toLowerCase() + "|" + ((b.authors || [])[0] || "").toLowerCase());
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+        });
+        if (books.length) valid.push({ ...row, books });
+    }
 
     if (!valid.length) {
         container.innerHTML = '<div class="empty-state">Unable to load discovery content</div>';
@@ -402,7 +431,7 @@ async function loadRequests() {
 }
 
 function renderRequest(req) {
-    const cover = req.cover_url || "https://via.placeholder.com/50x75/1f2937/ec4899?text=N/A";
+    const cover = req.cover_url || NO_COVER;
     const progress = req.progress || 0;
     const fillClass = req.status === "completed" ? "complete" : req.status === "error" ? "error" : "";
 
@@ -428,7 +457,7 @@ function renderRequest(req) {
     return `
         <div class="request-item">
             <img class="request-cover" src="${cover}" alt="${req.title}"
-                 onerror="this.src='https://via.placeholder.com/50x75/1f2937/ec4899?text=N/A'">
+                 onerror="this.onerror=null;this.src=window.NO_COVER">
             <div class="request-details">
                 <div class="request-title">${req.title}</div>
                 <div class="request-meta">${req.author || ""}</div>
@@ -836,6 +865,69 @@ window.testOIDC = async function () {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
                 issuer_url: document.getElementById("oidc-issuer-url").value,
+            }),
+        });
+        const data = await resp.json();
+        if (data.success) {
+            statusEl.className = "status-msg success";
+            statusEl.textContent = data.message;
+        } else {
+            statusEl.className = "status-msg error";
+            statusEl.textContent = "Failed: " + data.error;
+        }
+    } catch (err) {
+        statusEl.className = "status-msg error";
+        statusEl.textContent = "Error: " + err.message;
+    }
+};
+
+// ─── Hardcover (metadata source) Configuration ───
+
+async function loadHardcover() {
+    try {
+        const resp = await fetch("/api/hardcover");
+        const data = await resp.json();
+        document.getElementById("hardcover-token").value = data.token || "";
+    } catch (err) {
+        console.error("Failed to load Hardcover config", err);
+    }
+}
+
+window.saveHardcover = async function () {
+    const statusEl = document.getElementById("hardcover-status");
+    try {
+        const resp = await fetch("/api/hardcover", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                token: document.getElementById("hardcover-token").value,
+            }),
+        });
+        const data = await resp.json();
+        if (data.error) {
+            statusEl.className = "status-msg error";
+            statusEl.textContent = data.error;
+        } else {
+            statusEl.className = "status-msg success";
+            statusEl.textContent = "Hardcover settings saved!";
+        }
+    } catch (err) {
+        statusEl.className = "status-msg error";
+        statusEl.textContent = "Error: " + err.message;
+    }
+    setTimeout(() => { statusEl.textContent = ""; }, 3000);
+};
+
+window.testHardcover = async function () {
+    const statusEl = document.getElementById("hardcover-status");
+    statusEl.className = "status-msg";
+    statusEl.textContent = "Testing...";
+    try {
+        const resp = await fetch("/api/hardcover/test", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                token: document.getElementById("hardcover-token").value,
             }),
         });
         const data = await resp.json();

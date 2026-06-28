@@ -1,0 +1,26 @@
+# Local application data — contains secrets:
+# API tokens (Hardcover), server API keys, hashed passwords, session secret.
+# NEVER commit this.
+/data/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Claude Code / AI assistant files (may capture context, notes, or secrets)
+.claude/
+CLAUDE.md
+CLAUDE.local.md
+.mcp.json
+
+# Environment / secret files
+.env
+.env.*
+*.secret
+secret_key
+
+# Editor / OS noise
+.DS_Store
+.idea/
+.vscode/
