@@ -1064,6 +1064,71 @@ def get_root_folders(server_type):
 
 # ─── Download / Request API ───
 
+
+def _create_single_request(server_type, book_data, quality_profile_id, root_folder):
+    """Build and submit one request entry for a single server slot.
+
+    Returns the request_entry dict (status 'processing' on success, 'error' on
+    failure). Does NOT insert into requests_history or persist — the caller does
+    that for all entries together under `lock`.
+    """
+    title = book_data.get("title", "Unknown")
+    authors = book_data.get("authors", [])
+    author_name = authors[0] if authors else "Unknown"
+    cover_url = book_data.get("cover", "")
+    isbn = book_data.get("isbn_13") or book_data.get("isbn_10", "")
+
+    request_entry = {
+        "id": int(time.time() * 1000),
+        "title": title,
+        "author": author_name,
+        "cover_url": cover_url,
+        "server_type": server_type,
+        "quality_profile_id": quality_profile_id,
+        "isbn": isbn,
+        "status": "pending",
+        "progress": 0,
+        "error": None,
+        "created_at": datetime.now(UTC).isoformat(),
+    }
+
+    try:
+        client = get_client(server_type)
+        if not client:
+            raise ValueError(f"{server_type} server not configured")
+
+        readarr_books = []
+        if isbn:
+            readarr_books = client.lookup_by_isbn(isbn)
+        if not readarr_books:
+            readarr_books = client.search_books(f"{title} {author_name}")
+
+        if readarr_books:
+            readarr_book = readarr_books[0]
+            if not readarr_book.get("author", {}).get("authorName"):
+                readarr_book["author"] = {"authorName": author_name, "foreignAuthorId": ""}
+            app.logger.info(
+                "Backend match for '%s': title='%s', author=%s",
+                title, readarr_book.get("title"), json.dumps(readarr_book.get("author", {})),
+            )
+        else:
+            readarr_book = {
+                "title": title,
+                "author": {"authorName": author_name, "foreignAuthorId": ""},
+                "foreignBookId": isbn or book_data.get("id", ""),
+            }
+            app.logger.info("No backend match, using Open Library fallback for '%s' by '%s'", title, author_name)
+
+        request_entry["status"] = "processing"
+        result = client.add_book(readarr_book, quality_profile_id, root_folder)
+        request_entry["readarr_book_id"] = result.get("id")
+    except Exception as e:
+        request_entry["status"] = "error"
+        request_entry["error"] = str(e)
+
+    return request_entry
+
+
 @app.route("/api/request", methods=["POST"])
 @login_required
 def create_request():
