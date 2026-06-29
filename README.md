@@ -11,7 +11,8 @@ Libreseerr is a book request management application for [Readarr](https://readar
 ## Features
 
 - Search for books by title, author, or ISBN
-- Request ebooks or audiobooks from separate Readarr, Bookshelf, or LazyLibrarian instances
+- Request ebooks, audiobooks, or both at once from separate Readarr, Bookshelf, or LazyLibrarian instances
+- Optional Hardcover integration for richer search/discovery metadata (falls back to Open Library)
 - Track download progress with real-time status updates
 - View quality profiles and root folders from your configured server
 - Manage and remove requests from a dedicated requests page
@@ -102,6 +103,8 @@ Select the **Server Software** dropdown to choose between Readarr, Bookshelf, or
 
 Click **Test Connection** to verify each server is reachable, then **Save**.
 
+Optionally, add a **Hardcover** API token in **Settings** to use [Hardcover](https://hardcover.app/) as the search/discovery metadata source. When no token is set, Libreseerr uses the public Open Library API by default.
+
 ![Libreseerr Settings Page](screenshots/settings.png)
 
 ## Usage
@@ -109,7 +112,7 @@ Click **Test Connection** to verify each server is reachable, then **Save**.
 1. Log in with your admin credentials (default: `admin` / `admin`).
 2. Go to the **Discover** page and search for a book by title, author, or ISBN.
 3. Click a book card to open the download dialog.
-4. Select **ebook** or **audiobook**, choose a quality profile and root folder, then click **Download**.
+4. Select **ebook**, **audiobook**, or both. Each selected format gets its own quality profile and root folder (formats whose server isn't configured are disabled). Click **Download** to submit — requesting both creates one request per format.
 5. Switch to the **Requests** page to monitor progress.
 6. Click **Refresh Status** to poll your server for the latest download status.
 
@@ -186,6 +189,20 @@ python app.py
 ```
 
 The development server starts on `http://0.0.0.0:5000` with debug mode enabled.
+
+### Testing and Linting
+
+Install the dev dependencies, then run the linter and test suite:
+
+```bash
+pip install -r requirements-dev.txt
+ruff check .   # lint
+pytest         # test suite
+```
+
+Both run in CI (`.github/workflows/ci.yml`) on every push and pull request,
+alongside a job that builds the Docker image and verifies the container serves.
+Run `ruff check .` and `pytest` locally before opening a PR — both gate the build.
 
 ## License
 
