@@ -329,15 +329,15 @@ function renderServerButtons() {
             ? ""
             : `${label} server isn't configured. Configure it in Settings to request this format.`;
         btn.classList.toggle("active", selectedServers.has(slot));
-        btn.onclick = configured ? () => toggleServer(slot) : null;
+        btn.onclick = configured ? () => { toggleServer(slot).catch(console.error); } : null;
     });
 }
 
-function toggleServer(slot) {
+async function toggleServer(slot) {
     if (selectedServers.has(slot)) selectedServers.delete(slot);
     else selectedServers.add(slot);
     renderServerButtons();
-    renderSlotOptions();
+    await renderSlotOptions();
 }
 
 async function renderSlotOptions() {
@@ -349,11 +349,11 @@ async function renderSlotOptions() {
                 <h4 class="slot-heading">${s === "ebook" ? "Ebook" : "Audiobook"}</h4>
                 <div class="form-group">
                     <label>Quality Profile</label>
-                    <select class="slot-profile" data-slot="${s}"><option>Loading...</option></select>
+                    <select class="slot-profile" data-slot="${s}"><option value="">Loading...</option></select>
                 </div>
                 <div class="form-group">
                     <label>Root Folder</label>
-                    <select class="slot-folder" data-slot="${s}"><option>Loading...</option></select>
+                    <select class="slot-folder" data-slot="${s}"><option value="">Loading...</option></select>
                 </div>
             </div>`)
         .join("");
@@ -376,14 +376,14 @@ async function loadSlotOptions(slot) {
             slotOptionsCache[slot] = opts;
         }
         profileSelect.innerHTML = opts.profiles.error
-            ? `<option disabled>${opts.profiles.error}</option>`
+            ? `<option value="" disabled>${opts.profiles.error}</option>`
             : opts.profiles.map((p) => `<option value="${p.id}">${p.name}</option>`).join("");
         folderSelect.innerHTML = opts.folders.error
-            ? `<option disabled>${opts.folders.error}</option>`
+            ? `<option value="" disabled>${opts.folders.error}</option>`
             : opts.folders.map((f) => `<option value="${f.path}">${f.path}</option>`).join("");
     } catch (err) {
-        profileSelect.innerHTML = '<option disabled>Error loading</option>';
-        folderSelect.innerHTML = '<option disabled>Error loading</option>';
+        profileSelect.innerHTML = '<option value="" disabled>Error loading</option>';
+        folderSelect.innerHTML = '<option value="" disabled>Error loading</option>';
     }
     profileSelect.onchange = updateDownloadEnabled;
     folderSelect.onchange = updateDownloadEnabled;
