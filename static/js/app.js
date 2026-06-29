@@ -1,6 +1,8 @@
 // State
 let currentModalBook = null;
-let selectedServer = "ebook";
+let selectedServers = new Set(["ebook"]);
+let serverConfigured = { ebook: false, audiobook: false };
+let slotOptionsCache = {};
 let currentUser = null;
 let editingUsername = null;
 let cachedAvailability = null;
@@ -301,16 +303,14 @@ async function loadDiscovery() {
 
 async function openDownloadModal(book) {
     currentModalBook = book;
-    selectedServer = "ebook";
+    selectedServers = new Set();
+    if (serverConfigured.ebook) selectedServers.add("ebook");
+    else if (serverConfigured.audiobook) selectedServers.add("audiobook");
 
     document.getElementById("modal-title").textContent = "Download: " + (book.title || "Unknown");
-    document.querySelectorAll(".server-btn").forEach((btn) => {
-        btn.classList.toggle("active", btn.dataset.server === selectedServer);
-        btn.onclick = () => selectServer(btn.dataset.server);
-    });
-
+    renderServerButtons();
+    await renderSlotOptions();
     document.getElementById("download-modal").classList.add("active");
-    await loadModalOptions(selectedServer);
 }
 
 function closeModal() {
@@ -318,83 +318,123 @@ function closeModal() {
     currentModalBook = null;
 }
 
-async function selectServer(server) {
-    selectedServer = server;
+function renderServerButtons() {
     document.querySelectorAll(".server-btn").forEach((btn) => {
-        btn.classList.toggle("active", btn.dataset.server === server);
+        const slot = btn.dataset.server;
+        const label = slot === "ebook" ? "Ebook" : "Audiobook";
+        const configured = serverConfigured[slot];
+        btn.disabled = !configured;
+        btn.classList.toggle("disabled", !configured);
+        btn.title = configured
+            ? ""
+            : `${label} server isn't configured. Configure it in Settings to request this format.`;
+        btn.classList.toggle("active", selectedServers.has(slot));
+        btn.onclick = configured ? () => toggleServer(slot) : null;
     });
-    await loadModalOptions(server);
 }
 
-async function loadModalOptions(server) {
-    const profileSelect = document.getElementById("quality-profile");
-    const folderSelect = document.getElementById("root-folder");
-    profileSelect.innerHTML = '<option>Loading...</option>';
-    folderSelect.innerHTML = '<option>Loading...</option>';
+function toggleServer(slot) {
+    if (selectedServers.has(slot)) selectedServers.delete(slot);
+    else selectedServers.add(slot);
+    renderServerButtons();
+    renderSlotOptions();
+}
 
+async function renderSlotOptions() {
+    const container = document.getElementById("slot-options");
+    const slots = ["ebook", "audiobook"].filter((s) => selectedServers.has(s));
+    container.innerHTML = slots
+        .map((s) => `
+            <div class="slot-section" data-slot="${s}">
+                <h4 class="slot-heading">${s === "ebook" ? "Ebook" : "Audiobook"}</h4>
+                <div class="form-group">
+                    <label>Quality Profile</label>
+                    <select class="slot-profile" data-slot="${s}"><option>Loading...</option></select>
+                </div>
+                <div class="form-group">
+                    <label>Root Folder</label>
+                    <select class="slot-folder" data-slot="${s}"><option>Loading...</option></select>
+                </div>
+            </div>`)
+        .join("");
+    await Promise.all(slots.map(loadSlotOptions));
+    updateDownloadEnabled();
+}
+
+async function loadSlotOptions(slot) {
+    const profileSelect = document.querySelector(`.slot-profile[data-slot="${slot}"]`);
+    const folderSelect = document.querySelector(`.slot-folder[data-slot="${slot}"]`);
+    if (!profileSelect || !folderSelect) return;
     try {
-        const [profilesResp, foldersResp] = await Promise.all([
-            fetch("/api/profiles/" + server),
-            fetch("/api/rootfolders/" + server),
-        ]);
-        const profiles = await profilesResp.json();
-        const folders = await foldersResp.json();
-
-        if (profiles.error) {
-            profileSelect.innerHTML = `<option disabled>${profiles.error}</option>`;
-        } else {
-            profileSelect.innerHTML = profiles
-                .map((p) => `<option value="${p.id}">${p.name}</option>`)
-                .join("");
+        let opts = slotOptionsCache[slot];
+        if (!opts) {
+            const [pr, fr] = await Promise.all([
+                fetch("/api/profiles/" + slot),
+                fetch("/api/rootfolders/" + slot),
+            ]);
+            opts = { profiles: await pr.json(), folders: await fr.json() };
+            slotOptionsCache[slot] = opts;
         }
-
-        if (folders.error) {
-            folderSelect.innerHTML = `<option disabled>${folders.error}</option>`;
-        } else {
-            folderSelect.innerHTML = folders
-                .map((f) => `<option value="${f.path}">${f.path}</option>`)
-                .join("");
-        }
+        profileSelect.innerHTML = opts.profiles.error
+            ? `<option disabled>${opts.profiles.error}</option>`
+            : opts.profiles.map((p) => `<option value="${p.id}">${p.name}</option>`).join("");
+        folderSelect.innerHTML = opts.folders.error
+            ? `<option disabled>${opts.folders.error}</option>`
+            : opts.folders.map((f) => `<option value="${f.path}">${f.path}</option>`).join("");
     } catch (err) {
         profileSelect.innerHTML = '<option disabled>Error loading</option>';
         folderSelect.innerHTML = '<option disabled>Error loading</option>';
     }
+    profileSelect.onchange = updateDownloadEnabled;
+    folderSelect.onchange = updateDownloadEnabled;
+}
+
+function updateDownloadEnabled() {
+    const btn = document.getElementById("confirm-download-btn");
+    const slots = ["ebook", "audiobook"].filter((s) => selectedServers.has(s));
+    let ok = slots.length > 0;
+    for (const s of slots) {
+        const p = document.querySelector(`.slot-profile[data-slot="${s}"]`);
+        const f = document.querySelector(`.slot-folder[data-slot="${s}"]`);
+        if (!p || !f || !p.value || !f.value) { ok = false; break; }
+    }
+    btn.disabled = !ok;
 }
 
 document.getElementById("confirm-download-btn").addEventListener("click", async () => {
     if (!currentModalBook) return;
+    const slots = ["ebook", "audiobook"].filter((s) => selectedServers.has(s));
+    if (!slots.length) return;
+
+    const targets = [];
+    for (const s of slots) {
+        const qp = parseInt(document.querySelector(`.slot-profile[data-slot="${s}"]`).value);
+        const rf = document.querySelector(`.slot-folder[data-slot="${s}"]`).value;
+        if (!qp || !rf) {
+            alert("Please select a quality profile and root folder for each format.");
+            return;
+        }
+        targets.push({ server_type: s, quality_profile_id: qp, root_folder: rf });
+    }
 
     const btn = document.getElementById("confirm-download-btn");
     btn.disabled = true;
     btn.textContent = "Sending...";
-
-    const qualityProfileId = parseInt(document.getElementById("quality-profile").value);
-    const rootFolder = document.getElementById("root-folder").value;
-
-    if (!qualityProfileId || !rootFolder) {
-        alert("Please select a quality profile and root folder.");
-        btn.disabled = false;
-        btn.textContent = "Download";
-        return;
-    }
-
     try {
         const resp = await fetch("/api/request", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                server_type: selectedServer,
-                book: currentModalBook,
-                quality_profile_id: qualityProfileId,
-                root_folder: rootFolder,
-            }),
+            body: JSON.stringify({ book: currentModalBook, targets }),
         });
         const data = await resp.json();
         if (data.error) {
             alert("Error: " + data.error);
         } else {
+            const failed = (Array.isArray(data) ? data : []).filter((e) => e.status === "error");
+            if (failed.length) {
+                alert("Some formats failed: " + failed.map((e) => `${e.server_type} (${e.error})`).join("; "));
+            }
             closeModal();
-            // Switch to requests page
             document.querySelector('[data-page="requests"]').click();
         }
     } catch (err) {
@@ -489,6 +529,8 @@ async function loadConfig() {
     try {
         const resp = await fetch("/api/config");
         const data = await resp.json();
+        serverConfigured = { ebook: !!data.ebook.configured, audiobook: !!data.audiobook.configured };
+        slotOptionsCache = {};
         document.getElementById("ebook-url").value = data.ebook.url || "";
         document.getElementById("ebook-api").value = data.ebook.api_key || "";
         document.getElementById("audiobook-url").value = data.audiobook.url || "";
