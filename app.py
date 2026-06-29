@@ -9,13 +9,6 @@ from functools import wraps
 
 import requests as http_requests
 from flask import Flask, jsonify, redirect, render_template, request, url_for
-
-# Open Library / Internet Archive filters requests whose User-Agent starts with
-# "python-requests" (the requests library default), returning 403 on every API
-# call. Send an identifying UA so search/discover work on a fresh install.
-# https://github.com/zamnzim/Libreseerr/issues/10
-_USER_AGENT = "Libreseerr/1.0 (+https://github.com/zamnzim/Libreseerr)"
-http_requests.utils.default_user_agent = lambda *a, **kw: _USER_AGENT
 from flask_login import LoginManager, current_user, login_required, login_user, logout_user
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -36,6 +29,14 @@ from bookshelf import BookshelfClient
 from hardcover import HardcoverClient
 from lazylibrarian import LazyLibrarianClient
 from readarr import ReadarrClient
+
+# Open Library / Internet Archive filters requests whose User-Agent starts with
+# "python-requests" (the requests library default), returning 403 on every API
+# call. Send an identifying UA so search/discover work on a fresh install. This
+# runs at import time, before any HTTP request is issued.
+# https://github.com/zamnzim/Libreseerr/issues/10
+_USER_AGENT = "Libreseerr/1.0 (+https://github.com/zamnzim/Libreseerr)"
+http_requests.utils.default_user_agent = lambda *a, **kw: _USER_AGENT
 
 app = Flask(__name__)
 
