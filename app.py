@@ -1132,86 +1132,41 @@ def _create_single_request(server_type, book_data, quality_profile_id, root_fold
 @app.route("/api/request", methods=["POST"])
 @login_required
 def create_request():
-    data = request.json
-    server_type = data.get("server_type")
+    data = request.json or {}
     book_data = data.get("book")
-    quality_profile_id = data.get("quality_profile_id")
-    root_folder = data.get("root_folder")
+    targets = data.get("targets")
 
-    if not all([server_type, book_data, quality_profile_id, root_folder]):
-        return jsonify({"error": "Missing required fields"}), 400
+    if not book_data or not isinstance(targets, list) or not targets:
+        return jsonify({"error": "Request must include 'book' and a non-empty 'targets' list"}), 400
 
-    client = get_client(server_type)
-    if not client:
-        return jsonify({"error": f"{server_type} server not configured"}), 400
+    for t in targets:
+        if not isinstance(t, dict):
+            return jsonify({"error": "Each target must be an object"}), 400
+        st = t.get("server_type")
+        if st not in ("ebook", "audiobook"):
+            return jsonify({"error": "target server_type must be 'ebook' or 'audiobook'"}), 400
+        if not t.get("quality_profile_id") or not t.get("root_folder"):
+            return jsonify({"error": f"{st} target missing quality_profile_id or root_folder"}), 400
+        if not get_client(st):
+            return jsonify({"error": f"{st} server not configured"}), 400
 
-    title = book_data.get("title", "Unknown")
-    authors = book_data.get("authors", [])
-    author_name = authors[0] if authors else "Unknown"
-    cover_url = book_data.get("cover", "")
-    isbn = book_data.get("isbn_13") or book_data.get("isbn_10", "")
-
-    request_entry = {
-        "id": int(time.time() * 1000),
-        "title": title,
-        "author": author_name,
-        "cover_url": cover_url,
-        "server_type": server_type,
-        "quality_profile_id": quality_profile_id,
-        "isbn": isbn,
-        "status": "pending",
-        "progress": 0,
-        "error": None,
-        "created_at": datetime.now(UTC).isoformat(),
-    }
-
-    try:
-        # First, try to find the book in Readarr via ISBN lookup
-        readarr_books = []
-        if isbn:
-            readarr_books = client.lookup_by_isbn(isbn)
-        if not readarr_books:
-            readarr_books = client.search_books(f"{title} {author_name}")
-
-        if readarr_books:
-            # Use the full Readarr lookup result — it has the correct
-            # editions, images, links, etc. that Readarr expects.
-            # We only override the author if Readarr returned empty data.
-            readarr_book = readarr_books[0]
-            if not readarr_book.get("author", {}).get("authorName"):
-                readarr_book["author"] = {
-                    "authorName": author_name,
-                    "foreignAuthorId": "",
-                }
-            app.logger.info(
-                "Readarr match for '%s': title='%s', author=%s",
-                title, readarr_book.get("title"), json.dumps(readarr_book.get("author", {})),
-            )
-            request_entry["status"] = "processing"
-        else:
-            # Fallback: build data from Open Library
-            readarr_book = {
-                "title": title,
-                "author": {
-                    "authorName": author_name,
-                    "foreignAuthorId": "",
-                },
-                "foreignBookId": isbn or book_data.get("id", ""),
-            }
-            app.logger.info("No Readarr match, using Open Library fallback for '%s' by '%s'", title, author_name)
-            request_entry["status"] = "processing"
-
-        result = client.add_book(readarr_book, quality_profile_id, root_folder)
-        request_entry["readarr_book_id"] = result.get("id")
-    except Exception as e:
-        request_entry["status"] = "error"
-        request_entry["error"] = str(e)
+    entries = [
+        _create_single_request(
+            t["server_type"], book_data, t["quality_profile_id"], t["root_folder"]
+        )
+        for t in targets
+    ]
 
     with lock:
-        requests_history.insert(0, request_entry)
+        used_ids = {r["id"] for r in requests_history}
+        for entry in entries:
+            while entry["id"] in used_ids:
+                entry["id"] += 1  # avoid same-millisecond / existing-history id collisions
+            used_ids.add(entry["id"])
+            requests_history.insert(0, entry)
         save_requests()
 
-    return jsonify(request_entry)
+    return jsonify(entries)
 
 
 @app.route("/api/requests", methods=["GET"])
