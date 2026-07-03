@@ -231,6 +231,26 @@ def test_continue_series_caps_entries_per_card():
     assert len(out[0]["entries"]) == rec.SERIES_ENTRIES_CAP
 
 
+def test_continue_series_cap_keeps_upcoming_over_read():
+    # A long series (>cap) read deep in: the low read positions must not crowd out
+    # the upcoming installments when the entry list is capped.
+    lib = rec.parse_library({"me": [{"user_books": [
+        {"status_id": 3, "date_added": "2026-01-01", "book": {
+            "id": 1, "title": "Furthest", "cached_image": {"url": "c"},
+            "cached_featured_series": {"series": {"id": 7, "name": "S"}, "details": "70"}}},
+    ]}]})
+    # Positions 1..72 all present; furthest read = 70, so 71 and 72 are upcoming.
+    bs = [_bs(p, 100 + p, f"Book {p}") for p in range(1, 73)]
+    data = {"series": [{"id": 7, "name": "S", "primary_books_count": 100, "book_series": bs}]}
+    out = rec.select_continue_series(lib, data)
+    assert len(out) == 1
+    entries = out[0]["entries"]
+    assert len(entries) == rec.SERIES_ENTRIES_CAP          # capped
+    positions = [e["position"] for e in entries]
+    assert 71 in positions and 72 in positions            # upcoming retained
+    assert any(not e["read"] for e in entries)            # at least one to-get
+
+
 def test_more_by_authors_excludes_read_and_compilations():
     lib = rec.parse_library(_LIB)
     data = {"books": [

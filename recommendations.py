@@ -174,8 +174,9 @@ def select_continue_series(library: Library, data: dict) -> list:
     compilation/noise/already-read) and are flagged ``read: False``; unreleased
     ones are included and flagged ``released: False``. A series is emitted only if
     it has at least one upcoming installment to get, so which series appear is
-    unchanged. Capped at ``SERIES_ENTRIES_CAP`` entries; series ordered by recency
-    and capped at ``ROW_LIMIT``.
+    unchanged. Capped at the highest ``SERIES_ENTRIES_CAP`` positions (upcoming
+    installments are always retained); series ordered by recency and capped at
+    ``ROW_LIMIT``.
     """
     today = datetime.date.today().isoformat()
     groups_out = []  # (last_date, group dict)
@@ -223,7 +224,10 @@ def select_continue_series(library: Library, data: dict) -> list:
         # Gate: keep the series only if there's an upcoming installment to get.
         if not any(not is_read for _, is_read in canonical_by_pos.values()):
             continue
-        positions = sorted(canonical_by_pos)[:SERIES_ENTRIES_CAP]
+        # Keep the highest positions: upcoming installments sort highest, so
+        # capping from the top guarantees they're never dropped in favour of
+        # already-read context, and the read books we keep are the most recent.
+        positions = sorted(canonical_by_pos)[-SERIES_ENTRIES_CAP:]
         entries = []
         for pos in positions:
             book, is_read = canonical_by_pos[pos]
