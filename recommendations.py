@@ -1,0 +1,110 @@
+"""Hardcover-powered personal recommendation rows.
+
+Kept separate from hardcover.py (the metadata/search role) and from app.py (thin
+router). All Hardcover query strings, library parsing, and per-row filtering live
+here as pure functions plus one ``build_all(client)`` orchestrator. The Hardcover
+token is global (one account) — see the design spec — so no per-user cache key is
+needed, but the recommendation logic is isolated here so a per-user token could be
+threaded in later without a rewrite.
+"""
+import json
+import logging
+import re
+from dataclasses import dataclass, field
+
+import hardcover
+
+logger = logging.getLogger(__name__)
+
+PERSONALIZED_CATEGORIES = ("continue_series", "more_by_authors", "want_to_read")
+
+# Hardcover user_books.status_id values (verified live).
+STATUS_WANT = 1
+STATUS_READING = 2
+STATUS_READ = 3
+
+ROW_LIMIT = 20
+PER_SERIES_CAP = 3
+AUTHOR_MIN_USERS = 50
+
+
+@dataclass
+class Library:
+    read_ids: set = field(default_factory=set)
+    reading_ids: set = field(default_factory=set)
+    excluded_ids: set = field(default_factory=set)
+    author_ids: list = field(default_factory=list)
+    # series_id -> {"furthest": int, "last_date": str, "name": str}
+    series_progress: dict = field(default_factory=dict)
+    # [{"book": <book dict>, "date_added": str}]
+    want: list = field(default_factory=list)
+
+
+def _me(data: dict) -> dict:
+    me = data.get("me")
+    if isinstance(me, list):
+        me = me[0] if me else {}
+    return me or {}
+
+
+def _series_info(cfs):
+    """cached_featured_series -> (series_id, series_name, details) or None."""
+    if isinstance(cfs, str):
+        try:
+            cfs = json.loads(cfs)
+        except (ValueError, TypeError):
+            return None
+    if not isinstance(cfs, dict):
+        return None
+    series = cfs.get("series") or {}
+    sid = series.get("id")
+    if sid is None:
+        return None
+    return sid, series.get("name") or "", cfs.get("details")
+
+
+def _parse_int_position(value):
+    """Integer series position, or None for missing/fractional (e.g. 0.1)."""
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    if f != int(f):
+        return None
+    return int(f)
+
+
+def parse_library(data: dict) -> Library:
+    """Partition the raw ``me { user_books }`` response into a Library."""
+    lib = Library()
+    seen_authors = set()
+    for ub in _me(data).get("user_books") or []:
+        status = ub.get("status_id")
+        book = ub.get("book") or {}
+        bid = book.get("id")
+        date_added = ub.get("date_added") or ""
+        if bid is None:
+            continue
+        if status == STATUS_READ:
+            lib.read_ids.add(bid)
+            for c in book.get("contributions") or []:
+                aid = (c.get("author") or {}).get("id")
+                if aid is not None and aid not in seen_authors:
+                    seen_authors.add(aid)
+                    lib.author_ids.append(aid)
+            info = _series_info(book.get("cached_featured_series"))
+            if info:
+                sid, sname, details = info
+                entry = lib.series_progress.setdefault(
+                    sid, {"furthest": 0, "last_date": "", "name": sname})
+                pos = _parse_int_position(details)
+                if pos is not None and pos > entry["furthest"]:
+                    entry["furthest"] = pos
+                if date_added > entry["last_date"]:
+                    entry["last_date"] = date_added
+        elif status == STATUS_READING:
+            lib.reading_ids.add(bid)
+        elif status == STATUS_WANT:
+            lib.want.append({"book": book, "date_added": date_added})
+    lib.excluded_ids = lib.read_ids | lib.reading_ids
+    return lib
