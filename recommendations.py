@@ -108,3 +108,69 @@ def parse_library(data: dict) -> Library:
             lib.want.append({"book": book, "date_added": date_added})
     lib.excluded_ids = lib.read_ids | lib.reading_ids
     return lib
+
+
+# Box sets / omnibus editions: "..., Books 1-4", "Boxed Set", "Omnibus", "Bundle".
+_BOX_SET_RE = re.compile(
+    r"(books?\s+\d+\s*[-–—]\s*\d+|boxed?\s*set|omnibus|\bbundle\b)", re.I)
+# Parenthetical alternate/foreign editions: "(German Edition)", "(French)", etc.
+_ALT_EDITION_RE = re.compile(
+    r"\([^)]*\b(?:edition|language|prime|translation)\b[^)]*\)", re.I)
+
+
+def _has_cover(book):
+    return bool(hardcover.cover_url(book.get("cached_image")))
+
+
+def _rank(book):
+    """Canonical-pick ordering: more readers wins, then having a cover."""
+    return (book.get("users_count") or 0, 1 if _has_cover(book) else 0)
+
+
+def _is_noise(title):
+    title = title or ""
+    return bool(_BOX_SET_RE.search(title) or _ALT_EDITION_RE.search(title))
+
+
+def select_continue_series(library: Library, data: dict) -> list:
+    """Next unread primary entries per partly-read series, ordered by the user's
+    most-recent read activity. Returns normalized book dicts (shared schema)."""
+    blocks = []  # (last_date, [book dicts in position order])
+    for s in data.get("series") or []:
+        prog = library.series_progress.get(s.get("id"))
+        if not prog:
+            continue
+        furthest = prog["furthest"]
+        primary_count = s.get("primary_books_count") or 0
+        by_pos = {}  # position -> canonical book
+        for bs in s.get("book_series") or []:
+            pos = _parse_int_position(bs.get("position"))
+            if pos is None or pos <= furthest:
+                continue
+            if primary_count and pos > primary_count:
+                continue
+            book = bs.get("book") or {}
+            if book.get("compilation"):
+                continue
+            if book.get("id") in library.excluded_ids:
+                continue
+            if _is_noise(book.get("title", "")):
+                continue
+            cur = by_pos.get(pos)
+            if cur is None or _rank(book) > _rank(cur):
+                by_pos[pos] = book
+        positions = sorted(by_pos)[:PER_SERIES_CAP]
+        if positions:
+            blocks.append((prog["last_date"], [by_pos[p] for p in positions]))
+    blocks.sort(key=lambda b: b[0], reverse=True)
+    out, seen = [], set()
+    for _, books in blocks:
+        for book in books:
+            bid = book.get("id")
+            if bid in seen:
+                continue
+            seen.add(bid)
+            out.append(hardcover.normalize_book_row(book))
+            if len(out) >= ROW_LIMIT:
+                return out
+    return out
