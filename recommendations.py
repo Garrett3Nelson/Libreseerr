@@ -7,6 +7,7 @@ token is global (one account) — see the design spec — so no per-user cache k
 needed, but the recommendation logic is isolated here so a per-user token could be
 threaded in later without a rewrite.
 """
+import datetime
 import json
 import logging
 import re
@@ -129,12 +130,27 @@ def _rank(book):
 
 def _is_noise(title):
     title = title or ""
+    if title.strip().lower().startswith("untitled"):
+        return True
     return bool(_BOX_SET_RE.search(title) or _ALT_EDITION_RE.search(title))
+
+
+def _is_unreleased(book, today):
+    """Future-dated (announced but not published) — not requestable."""
+    rel = (book.get("release_date") or "")[:10]
+    return bool(rel) and rel > today
 
 
 def select_continue_series(library: Library, data: dict) -> list:
     """Next unread primary entries per partly-read series, ordered by the user's
-    most-recent read activity. Returns normalized book dicts (shared schema)."""
+    most-recent read activity. Returns normalized book dicts (shared schema).
+
+    Each integer position is one installment. We pick the *canonical* edition
+    (most readers, then has-cover) to represent that installment, then apply the
+    content filters to it — so a compilation/already-read/unreleased installment
+    is dropped entirely rather than falling back to a low-quality foreign edition.
+    """
+    today = datetime.date.today().isoformat()
     blocks = []  # (last_date, [book dicts in position order])
     for s in data.get("series") or []:
         prog = library.series_progress.get(s.get("id"))
@@ -142,23 +158,36 @@ def select_continue_series(library: Library, data: dict) -> list:
             continue
         furthest = prog["furthest"]
         primary_count = s.get("primary_books_count") or 0
-        by_pos = {}  # position -> canonical book
+        # Positions where the user already read *any* edition. cached_featured_series
+        # only gives an approximate "furthest"; this catches installments read out of
+        # order and stops a foreign edition of a read book slipping in at its slot.
+        read_positions = {
+            _parse_int_position(bs.get("position"))
+            for bs in s.get("book_series") or []
+            if (bs.get("book") or {}).get("id") in library.excluded_ids
+        }
+        read_positions.discard(None)
+        # Group all editions by integer position.
+        groups = {}
         for bs in s.get("book_series") or []:
             pos = _parse_int_position(bs.get("position"))
-            if pos is None or pos <= furthest:
+            if pos is None or pos <= furthest or pos in read_positions:
                 continue
             if primary_count and pos > primary_count:
                 continue
-            book = bs.get("book") or {}
-            if book.get("compilation"):
+            groups.setdefault(pos, []).append(bs.get("book") or {})
+        by_pos = {}  # position -> canonical book that survived filtering
+        for pos, editions in groups.items():
+            canonical = max(editions, key=_rank)
+            if canonical.get("compilation"):
                 continue
-            if book.get("id") in library.excluded_ids:
+            if canonical.get("id") in library.excluded_ids:
                 continue
-            if _is_noise(book.get("title", "")):
+            if _is_noise(canonical.get("title", "")):
                 continue
-            cur = by_pos.get(pos)
-            if cur is None or _rank(book) > _rank(cur):
-                by_pos[pos] = book
+            if _is_unreleased(canonical, today):
+                continue
+            by_pos[pos] = canonical
         positions = sorted(by_pos)[:PER_SERIES_CAP]
         if positions:
             blocks.append((prog["last_date"], [by_pos[p] for p in positions]))
@@ -227,7 +256,7 @@ SERIES_QUERY = """
 query SeriesExpand($ids: [Int!]) {
   series(where: {id: {_in: $ids}}) {
     id name books_count primary_books_count
-    book_series(order_by: {position: asc}, limit: 40) {
+    book_series(order_by: {position: asc}, limit: 100) {
       position
       book {
         id title release_date cached_image compilation users_count
@@ -241,7 +270,7 @@ query SeriesExpand($ids: [Int!]) {
 BY_AUTHORS_QUERY = """
 query ByAuthors($aids: [Int!]) {
   books(where: {contributions: {author_id: {_in: $aids}}, users_count: {_gte: __MIN_USERS__}},
-        order_by: {users_count: desc}, limit: 30) {
+        order_by: {users_count: desc}, limit: 60) {
     id title release_date users_count cached_image compilation
     contributions(limit: 2) { author { name } }
   }
