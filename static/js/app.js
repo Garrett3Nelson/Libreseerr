@@ -448,7 +448,22 @@ function renderSeriesEntry(card, entries) {
     card.querySelector(".series-next").disabled = idx === entries.length - 1;
 }
 
-function hideFullyOwnedFlatCards(availability) { /* implemented in Task 10 */ }
+function hideFullyOwnedFlatCards(availability) {
+    document.querySelectorAll(".book-card").forEach((card) => {
+        let book;
+        try { book = JSON.parse(card.dataset.book); } catch { return; }
+        const own = bookOwnership(book, availability);
+        const slots = [];
+        if (serverConfigured.ebook) slots.push(own.hasEbook || own.ebookRequested);
+        if (serverConfigured.audiobook) slots.push(own.hasAudiobook || own.audiobookRequested);
+        if (slots.length > 0 && slots.every(Boolean)) card.remove();
+    });
+    // Hide any discovery row left with no cards after removals.
+    document.querySelectorAll(".discovery-row").forEach((rowEl) => {
+        const scroll = rowEl.querySelector(".discovery-row-scroll");
+        if (scroll && scroll.children.length === 0) rowEl.remove();
+    });
+}
 
 // ─── Download Modal ───
 
