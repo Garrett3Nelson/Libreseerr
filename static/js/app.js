@@ -289,22 +289,25 @@ async function loadDiscovery() {
             const resp = await fetch("/api/discover?category=" + encodeURIComponent(cat.key) + "&limit=20");
             const data = await resp.json();
             if (data.error || !data.length) return null;
-            return { ...cat, books: data };
+            return { ...cat, data };
         } catch {
             return null;
         }
     });
-
     const results = await Promise.all(promises);
 
-    // Dedupe across rows: a popular work shows up in several categories
-    // (Best Sellers, Fiction, Fantasy…). Keep each book in the first row it
-    // appears in and drop later repeats, so the same title isn't shown 3x.
+    // Dedupe across FLAT rows only: a popular work shows up in several categories
+    // (Best Sellers, Fiction, Fantasy…). continue_series is grouped and rendered
+    // separately, so it's exempt from the flat dedupe.
     const seen = new Set();
     const valid = [];
     for (const row of results) {
         if (!row) continue;
-        const books = row.books.filter((b) => {
+        if (row.key === "continue_series") {
+            valid.push({ ...row, grouped: true });
+            continue;
+        }
+        const books = row.data.filter((b) => {
             const key = b.id || ((b.title || "").toLowerCase() + "|" + ((b.authors || [])[0] || "").toLowerCase());
             if (seen.has(key)) return false;
             seen.add(key);
@@ -318,15 +321,134 @@ async function loadDiscovery() {
         return;
     }
 
-    container.innerHTML = valid.map(renderDiscoveryRow).join("");
+    container.innerHTML = valid.map((row) =>
+        row.grouped ? renderSeriesRow(row) : renderDiscoveryRow(row)).join("");
 
+    // Flat book cards open the download modal on click.
     container.querySelectorAll(".book-card").forEach((card) => {
-        card.addEventListener("click", () => {
-            openDownloadModal(JSON.parse(card.dataset.book));
-        });
+        card.addEventListener("click", () => openDownloadModal(JSON.parse(card.dataset.book)));
     });
-    fetchAvailability().then(applyAvailabilityBadges);
+
+    // Availability drives flat badges, series default-entry selection, and the
+    // hide-fully-owned pass — all after /api/availability resolves.
+    fetchAvailability().then((availability) => {
+        applyAvailabilityBadges(availability);
+        initSeriesCards(availability);
+        hideFullyOwnedFlatCards(availability);
+    });
 }
+
+function renderSeriesRow(row) {
+    const cards = row.data.map(renderSeriesCard).join("");
+    return `
+        <div class="discovery-row">
+            <div class="discovery-row-header">
+                <div class="discovery-row-title">${row.title}</div>
+            </div>
+            <div class="discovery-row-scroll">${cards}</div>
+        </div>`;
+}
+
+// One card per series. All entries are stored as JSON on the element; navigation
+// swaps the visible entry. Data-only here — the default index and owned badges
+// are set later by initSeriesCards once availability resolves.
+function renderSeriesCard(group) {
+    const entriesJson = JSON.stringify(group.entries).replace(/"/g, "&quot;");
+    const nameJson = (group.series_name || "").replace(/"/g, "&quot;");
+    return `
+        <div class="series-card" data-entries="${entriesJson}" data-index="0" data-series="${nameJson}">
+            <div class="series-card-name">${group.series_name || ""}</div>
+            <div class="series-card-body"></div>
+            <div class="series-card-nav">
+                <button class="series-arrow series-prev" aria-label="Previous">‹</button>
+                <span class="series-pos"></span>
+                <button class="series-arrow series-next" aria-label="Next">›</button>
+            </div>
+        </div>`;
+}
+
+let seriesAvailability = null;
+
+function entryFullyOwned(entry, availability) {
+    const own = bookOwnership(entry, availability);
+    const slots = [];
+    if (serverConfigured.ebook) slots.push(own.hasEbook || own.ebookRequested);
+    if (serverConfigured.audiobook) slots.push(own.hasAudiobook || own.audiobookRequested);
+    return slots.length > 0 && slots.every(Boolean);
+}
+
+// First entry the user should act on: released and not fully owned.
+function nextGapIndex(entries, availability) {
+    for (let i = 0; i < entries.length; i++) {
+        if (entries[i].released && !entryFullyOwned(entries[i], availability)) return i;
+    }
+    return -1;
+}
+
+function initSeriesCards(availability) {
+    seriesAvailability = availability;
+    document.querySelectorAll(".series-card").forEach((card) => {
+        let entries;
+        try { entries = JSON.parse(card.dataset.entries); } catch { entries = []; }
+        const gap = nextGapIndex(entries, availability);
+        if (gap === -1) { card.remove(); return; }  // fully owned series -> hide
+        card.dataset.index = String(gap);
+        renderSeriesEntry(card, entries);
+        card.querySelector(".series-prev").addEventListener("click", () => stepSeries(card, -1));
+        card.querySelector(".series-next").addEventListener("click", () => stepSeries(card, 1));
+    });
+    // Hide any discovery row whose series cards were all removed.
+    document.querySelectorAll(".discovery-row").forEach((rowEl) => {
+        const scroll = rowEl.querySelector(".discovery-row-scroll");
+        if (scroll && scroll.children.length === 0) rowEl.remove();
+    });
+}
+
+function stepSeries(card, delta) {
+    let entries;
+    try { entries = JSON.parse(card.dataset.entries); } catch { return; }
+    let idx = parseInt(card.dataset.index, 10) + delta;
+    idx = Math.max(0, Math.min(entries.length - 1, idx));  // clamp at ends
+    card.dataset.index = String(idx);
+    renderSeriesEntry(card, entries);
+}
+
+function renderSeriesEntry(card, entries) {
+    const idx = parseInt(card.dataset.index, 10);
+    const entry = entries[idx];
+    const body = card.querySelector(".series-card-body");
+    const cover = entry.cover || NO_COVER;
+    const author = Array.isArray(entry.authors) ? entry.authors.join(", ") : "";
+    const year = (entry.publishedDate || "").substring(0, 4);
+
+    let badges = "";
+    if (!entry.released) {
+        badges = `<span class="book-badge coming">Coming${year ? " " + year : ""}</span>`;
+    } else if (seriesAvailability) {
+        const own = bookOwnership(entry, seriesAvailability);
+        if (own.ebookRequested) badges += '<span class="book-badge ebook-requested">eBook Requested</span>';
+        else if (own.hasEbook) badges += '<span class="book-badge ebook">eBook ✓</span>';
+        if (own.audiobookRequested) badges += '<span class="book-badge audiobook-requested">Audiobook Requested</span>';
+        else if (own.hasAudiobook) badges += '<span class="book-badge audiobook">Audiobook ✓</span>';
+    }
+
+    body.innerHTML = `
+        <img class="series-cover" src="${cover}" alt="${entry.title || ""}" loading="lazy"
+             onerror="this.onerror=null;this.src=window.NO_COVER">
+        <div class="series-entry-title" title="${entry.title || ""}">${entry.title || ""}</div>
+        <div class="series-entry-author">${author}${year ? " (" + year + ")" : ""}</div>
+        <div class="book-badges">${badges}</div>`;
+
+    // Clicking a released entry opens the request modal; unreleased is inert.
+    body.onclick = entry.released ? () => openDownloadModal(entry) : null;
+    body.classList.toggle("series-unreleased", !entry.released);
+
+    card.querySelector(".series-pos").textContent = `${idx + 1} / ${entries.length}`;
+    card.querySelector(".series-prev").disabled = idx === 0;
+    card.querySelector(".series-next").disabled = idx === entries.length - 1;
+}
+
+function hideFullyOwnedFlatCards(availability) { /* implemented in Task 10 */ }
 
 // ─── Download Modal ───
 
