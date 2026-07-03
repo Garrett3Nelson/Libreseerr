@@ -356,8 +356,10 @@ function renderSeriesRow(row) {
 function renderSeriesCard(group) {
     const entriesJson = JSON.stringify(group.entries).replace(/"/g, "&quot;");
     const nameJson = (group.series_name || "").replace(/"/g, "&quot;");
+    const total = group.series_total || group.entries.length;
     return `
-        <div class="series-card" data-entries="${entriesJson}" data-index="0" data-series="${nameJson}">
+        <div class="series-card" data-entries="${entriesJson}" data-index="0"
+             data-total="${total}" data-series="${nameJson}">
             <div class="series-card-name">${group.series_name || ""}</div>
             <div class="series-card-body"></div>
             <div class="series-card-nav">
@@ -378,10 +380,16 @@ function entryFullyOwned(entry, availability) {
     return slots.length > 0 && slots.every(Boolean);
 }
 
-// First entry the user should act on: released and not fully owned.
+// First entry the user should act on: released, not already read, not fully owned.
+// Falls back to the first not-read entry (e.g. only unreleased installments remain)
+// so the card still opens past the read backlog rather than on book 1.
 function nextGapIndex(entries, availability) {
     for (let i = 0; i < entries.length; i++) {
-        if (entries[i].released && !entryFullyOwned(entries[i], availability)) return i;
+        const e = entries[i];
+        if (!e.read && e.released && !entryFullyOwned(e, availability)) return i;
+    }
+    for (let i = 0; i < entries.length; i++) {
+        if (!entries[i].read) return i;
     }
     return -1;
 }
@@ -423,8 +431,9 @@ function renderSeriesEntry(card, entries) {
     const year = (entry.publishedDate || "").substring(0, 4);
 
     let badges = "";
+    if (entry.read) badges += '<span class="book-badge read">Read ✓</span>';
     if (!entry.released) {
-        badges = `<span class="book-badge coming">Coming${year ? " " + year : ""}</span>`;
+        badges += `<span class="book-badge coming">Coming${year ? " " + year : ""}</span>`;
     } else if (seriesAvailability) {
         const own = bookOwnership(entry, seriesAvailability);
         if (own.ebookRequested) badges += '<span class="book-badge ebook-requested">eBook Requested</span>';
@@ -444,7 +453,8 @@ function renderSeriesEntry(card, entries) {
     body.onclick = entry.released ? () => openDownloadModal(entry) : null;
     body.classList.toggle("series-unreleased", !entry.released);
 
-    card.querySelector(".series-pos").textContent = `${idx + 1} / ${entries.length}`;
+    const total = card.dataset.total || entries.length;
+    card.querySelector(".series-pos").textContent = `${entry.position} / ${total}`;
     card.querySelector(".series-prev").disabled = idx === 0;
     card.querySelector(".series-next").disabled = idx === entries.length - 1;
 }

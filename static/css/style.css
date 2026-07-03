@@ -955,3 +955,4 @@ body.is-admin .sidebar-role {
 .series-arrow:disabled { opacity: 0.3; cursor: default; }
 .series-pos { font-size: 0.75rem; color: var(--text-muted); }
 .book-badge.coming { background: rgba(107, 114, 128, 0.2); color: #9ca3af; }
+.book-badge.read { background: #16a34a; color: #fff; }
