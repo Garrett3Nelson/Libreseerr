@@ -988,6 +988,21 @@ def search_books():
         return jsonify({"error": str(e)}), 500
 
 
+def _library_book_author(book):
+    """Best-effort author name from a backend book (Readarr/Bookshelf/LazyLibrarian).
+    Empty-safe: returns "" when the backend doesn't expose an author."""
+    author = book.get("author")
+    if isinstance(author, dict):
+        name = author.get("authorName") or author.get("name") or ""
+        if name:
+            return name
+    for key in ("authorName", "authorname", "AuthorName", "author_name"):
+        val = book.get(key)
+        if isinstance(val, str) and val:
+            return val
+    return ""
+
+
 @app.route("/api/availability")
 @login_required
 def check_availability():
@@ -1001,7 +1016,7 @@ def check_availability():
         try:
             books = client.get_books()
             isbns = set()
-            titles = set()
+            titles = set()  # normalized match keys (matching.match_key)
             for book in books:
                 title = ""
                 # Readarr/Bookshelf format: editions array with isbn fields
@@ -1028,7 +1043,9 @@ def check_availability():
                         isbns.add(isbn)
                     title = book.get("bookname", book.get("title", ""))
                 if title:
-                    titles.add(title.lower())
+                    author = _library_book_author(book)
+                    titles.add(matching.match_key(title, author))
+                    titles.add(matching.match_key(title))
             result[server_type] = {
                 "isbns": list(isbns),
                 "titles": list(titles),
@@ -1051,7 +1068,9 @@ def check_availability():
                 requests_by_type[server]["isbns"].add(isbn)
             title = req.get("title", "")
             if title:
-                requests_by_type[server]["titles"].add(title.lower())
+                author = req.get("author", "")
+                requests_by_type[server]["titles"].add(matching.match_key(title, author))
+                requests_by_type[server]["titles"].add(matching.match_key(title))
 
     result["ebook_requests"] = {
         "isbns": list(requests_by_type["ebook"]["isbns"]),
