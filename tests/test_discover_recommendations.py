@@ -59,6 +59,28 @@ def test_continue_series_returns_grouped_structure(auth_client, monkeypatch):
     assert groups[0]["entries"][0]["released"] is True
 
 
+def test_continue_series_passes_read_and_series_total(auth_client, monkeypatch):
+    monkeypatch.setattr(app_module, "get_metadata_client", lambda: object())
+    monkeypatch.setattr(recommendations, "build_all", lambda client: {
+        "continue_series": [{
+            "series_id": 1, "series_name": "Stormlight", "series_total": 15,
+            "entries": [
+                {"id": "100", "title": "The Way of Kings", "position": 1,
+                 "released": True, "read": True, "match_title": "way of kings|"},
+                {"id": "102", "title": "Oathbringer", "position": 3,
+                 "released": True, "read": False, "match_title": "oathbringer|"},
+            ],
+        }],
+        "more_by_authors": [], "want_to_read": [],
+    })
+    resp = auth_client.get("/api/discover?category=continue_series")
+    assert resp.status_code == 200
+    group = resp.get_json()[0]
+    assert group["series_total"] == 15
+    assert group["entries"][0]["read"] is True
+    assert group["entries"][1]["read"] is False
+
+
 def test_flat_rows_stay_flat(auth_client, monkeypatch):
     monkeypatch.setattr(app_module, "get_metadata_client", lambda: object())
     monkeypatch.setattr(recommendations, "build_all", lambda client: {
