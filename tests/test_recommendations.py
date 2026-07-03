@@ -119,3 +119,33 @@ def test_continue_series_orders_series_by_recency():
     ]}
     out = rec.select_continue_series(lib, data)
     assert [b["id"] for b in out] == ["22", "11"]  # series B (more recent) first
+
+
+def test_more_by_authors_excludes_read_and_compilations():
+    lib = rec.parse_library(_LIB)
+    data = {"books": [
+        {"id": 101, "title": "Words of Radiance"},          # already read -> drop
+        {"id": 200, "title": "R"},                          # currently reading -> drop
+        {"id": 500, "title": "Warbreaker", "cached_image": {"url": "c"},
+         "contributions": [{"author": {"name": "Sanderson"}}]},   # keep
+        {"id": 501, "title": "Sanderson Omnibus", "compilation": True},  # drop
+    ]}
+    out = rec.select_more_by_authors(lib, data)
+    assert [b["id"] for b in out] == ["500"]
+    assert out[0]["authors"] == ["Sanderson"]
+
+
+def test_more_by_authors_caps_and_dedupes():
+    lib = rec.parse_library({"me": [{"user_books": []}]})
+    books = [{"id": i, "title": f"B{i}"} for i in range(30)]
+    books.append({"id": 0, "title": "dup"})  # duplicate id
+    out = rec.select_more_by_authors(lib, {"books": books})
+    assert len(out) == rec.ROW_LIMIT
+    assert len({b["id"] for b in out}) == rec.ROW_LIMIT
+
+
+def test_want_to_read_recency_order_and_cap():
+    lib = rec.parse_library(_LIB)
+    out = rec.select_want_to_read(lib)
+    assert [b["id"] for b in out] == ["301", "300"]  # newest date_added first
+    assert out[0]["authors"] == ["Y"]

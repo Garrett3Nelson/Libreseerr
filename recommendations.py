@@ -174,3 +174,26 @@ def select_continue_series(library: Library, data: dict) -> list:
             if len(out) >= ROW_LIMIT:
                 return out
     return out
+
+
+def select_more_by_authors(library: Library, data: dict) -> list:
+    """Popular books by authors of the user's Read set, excluding books already
+    read/reading and compilations. Returns normalized book dicts."""
+    out, seen = [], set()
+    for book in data.get("books") or []:
+        bid = book.get("id")
+        if bid in library.excluded_ids or bid in seen:
+            continue
+        if book.get("compilation"):
+            continue
+        seen.add(bid)
+        out.append(hardcover.normalize_book_row(book))
+        if len(out) >= ROW_LIMIT:
+            break
+    return out
+
+
+def select_want_to_read(library: Library) -> list:
+    """The account's Want-to-Read shelf, most-recently-added first."""
+    items = sorted(library.want, key=lambda w: w.get("date_added") or "", reverse=True)
+    return [hardcover.normalize_book_row(w["book"]) for w in items[:ROW_LIMIT]]
