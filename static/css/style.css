@@ -505,6 +505,18 @@ body.is-admin .sidebar-role {
     border-color: var(--pink-primary);
 }
 
+.server-btn:disabled, .server-btn.disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.slot-section { margin-top: 0.75rem; }
+.slot-heading {
+    margin: 0.5rem 0 0.25rem;
+    font-size: 0.9rem;
+    color: var(--text-secondary);
+}
+
 /* ─── Settings ─── */
 .settings-grid {
     display: grid;

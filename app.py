@@ -30,6 +30,14 @@ from hardcover import HardcoverClient
 from lazylibrarian import LazyLibrarianClient
 from readarr import ReadarrClient
 
+# Open Library / Internet Archive filters requests whose User-Agent starts with
+# "python-requests" (the requests library default), returning 403 on every API
+# call. Send an identifying UA so search/discover work on a fresh install. This
+# runs at import time, before any HTTP request is issued.
+# https://github.com/zamnzim/Libreseerr/issues/10
+_USER_AGENT = "Libreseerr/1.0 (+https://github.com/zamnzim/Libreseerr)"
+http_requests.utils.default_user_agent = lambda *a, **kw: _USER_AGENT
+
 app = Flask(__name__)
 
 # Honor X-Forwarded-* headers from a reverse proxy (haproxy, nginx, traefik, etc.)
@@ -1057,22 +1065,14 @@ def get_root_folders(server_type):
 
 # ─── Download / Request API ───
 
-@app.route("/api/request", methods=["POST"])
-@login_required
-def create_request():
-    data = request.json
-    server_type = data.get("server_type")
-    book_data = data.get("book")
-    quality_profile_id = data.get("quality_profile_id")
-    root_folder = data.get("root_folder")
 
-    if not all([server_type, book_data, quality_profile_id, root_folder]):
-        return jsonify({"error": "Missing required fields"}), 400
+def _create_single_request(server_type, book_data, quality_profile_id, root_folder):
+    """Build and submit one request entry for a single server slot.
 
-    client = get_client(server_type)
-    if not client:
-        return jsonify({"error": f"{server_type} server not configured"}), 400
-
+    Returns the request_entry dict (status 'processing' on success, 'error' on
+    failure). Does NOT insert into requests_history or persist — the caller does
+    that for all entries together under `lock`.
+    """
     title = book_data.get("title", "Unknown")
     authors = book_data.get("authors", [])
     author_name = authors[0] if authors else "Unknown"
@@ -1094,7 +1094,10 @@ def create_request():
     }
 
     try:
-        # First, try to find the book in Readarr via ISBN lookup
+        client = get_client(server_type)
+        if not client:
+            raise ValueError(f"{server_type} server not configured")
+
         readarr_books = []
         if isbn:
             readarr_books = client.lookup_by_isbn(isbn)
@@ -1102,44 +1105,69 @@ def create_request():
             readarr_books = client.search_books(f"{title} {author_name}")
 
         if readarr_books:
-            # Use the full Readarr lookup result — it has the correct
-            # editions, images, links, etc. that Readarr expects.
-            # We only override the author if Readarr returned empty data.
             readarr_book = readarr_books[0]
             if not readarr_book.get("author", {}).get("authorName"):
-                readarr_book["author"] = {
-                    "authorName": author_name,
-                    "foreignAuthorId": "",
-                }
+                readarr_book["author"] = {"authorName": author_name, "foreignAuthorId": ""}
             app.logger.info(
-                "Readarr match for '%s': title='%s', author=%s",
+                "Backend match for '%s': title='%s', author=%s",
                 title, readarr_book.get("title"), json.dumps(readarr_book.get("author", {})),
             )
-            request_entry["status"] = "processing"
         else:
-            # Fallback: build data from Open Library
             readarr_book = {
                 "title": title,
-                "author": {
-                    "authorName": author_name,
-                    "foreignAuthorId": "",
-                },
+                "author": {"authorName": author_name, "foreignAuthorId": ""},
                 "foreignBookId": isbn or book_data.get("id", ""),
             }
-            app.logger.info("No Readarr match, using Open Library fallback for '%s' by '%s'", title, author_name)
-            request_entry["status"] = "processing"
+            app.logger.info("No backend match, using Open Library fallback for '%s' by '%s'", title, author_name)
 
+        request_entry["status"] = "processing"
         result = client.add_book(readarr_book, quality_profile_id, root_folder)
         request_entry["readarr_book_id"] = result.get("id")
     except Exception as e:
         request_entry["status"] = "error"
         request_entry["error"] = str(e)
 
+    return request_entry
+
+
+@app.route("/api/request", methods=["POST"])
+@login_required
+def create_request():
+    data = request.json or {}
+    book_data = data.get("book")
+    targets = data.get("targets")
+
+    if not book_data or not isinstance(targets, list) or not targets:
+        return jsonify({"error": "Request must include 'book' and a non-empty 'targets' list"}), 400
+
+    for t in targets:
+        if not isinstance(t, dict):
+            return jsonify({"error": "Each target must be an object"}), 400
+        st = t.get("server_type")
+        if st not in ("ebook", "audiobook"):
+            return jsonify({"error": "target server_type must be 'ebook' or 'audiobook'"}), 400
+        if not t.get("quality_profile_id") or not t.get("root_folder"):
+            return jsonify({"error": f"{st} target missing quality_profile_id or root_folder"}), 400
+        if not get_client(st):
+            return jsonify({"error": f"{st} server not configured"}), 400
+
+    entries = [
+        _create_single_request(
+            t["server_type"], book_data, t["quality_profile_id"], t["root_folder"]
+        )
+        for t in targets
+    ]
+
     with lock:
-        requests_history.insert(0, request_entry)
+        used_ids = {r["id"] for r in requests_history}
+        for entry in entries:
+            while entry["id"] in used_ids:
+                entry["id"] += 1  # avoid same-millisecond / existing-history id collisions
+            used_ids.add(entry["id"])
+            requests_history.insert(0, entry)
         save_requests()
 
-    return jsonify(request_entry)
+    return jsonify(entries)
 
 
 @app.route("/api/requests", methods=["GET"])
