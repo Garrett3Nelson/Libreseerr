@@ -33,3 +33,48 @@ option, rather than special-casing `ReadarrClient`.
 June 2025 (dead metadata backend) and Bindery is the main migration target.
 
 Refs: https://github.com/vavallee/bindery , docs/API.md in that repo.
+
+## Verify request modal "pre-select missing format" on a two-slot account
+
+**What:** Feature 3 of the library-aware recommendations work (spec
+`docs/superpowers/specs/2026-07-03-library-aware-recommendations-design.md`)
+specifies that when the request modal opens for a *partially*-owned book (owned
+in one format, missing the other), it should pre-select the **missing** format's
+target instead of defaulting to ebook. The owned-marking half ("Already in
+library" / disabled server button) was visually confirmed during browser
+verification; the **auto-select-the-missing-slot** half was NOT visually
+confirmed against the live account.
+
+**Where:** `static/js/app.js` `openDownloadModal` (the loop that adds each
+configured-but-not-owned slot to `selectedServers`) and `renderServerButtons`
+(`.owned` marking). Backend match keys from `/api/availability`.
+
+**Why unverified:** The live account has only the **ebook** slot configured
+(audiobook has no URL). With a single configured slot, "fully owned" == owned in
+that one slot, so an owned book is hidden and partial ownership never arises —
+there is no second slot to auto-select. The auto-select branch is therefore
+unreachable on this account.
+
+**Already tried:** Browser-verified everything else live (series cards, clean
+names, arrow paging + end clamp, next-gap open, "Coming <year>" unreleased state
+and non-requestability, owned "eBook ✓" badge on flat and series cards,
+hide-fully-owned flat card, hide-fully-owned series, modal "In library"
+owned-marking) — the last four by driving the real frontend functions
+(`applyAvailabilityBadges`, `hideFullyOwnedFlatCards`, `initSeriesCards`,
+`openDownloadModal`) against the live DOM with synthetic availability, since no
+current recommendation intersects the owned library. Could not exercise the
+two-slot pre-select path because no audiobook server is configured.
+
+**To finish:** Configure both an ebook and an audiobook server, own a title in
+exactly one of them, and confirm the modal opens with the *other* format's
+target pre-selected and the owned one marked "In library".
+
+## Note: Bookshelf exposes no ISBN or author for availability matching
+
+Not a bug — recording the observed live behavior. The configured Bookshelf
+ebook server's `get_books()` returns titles but no ISBNs and no author, so
+`/api/availability` emits title-only match keys (`"<normtitle>|"`) and matching
+runs on the normalized-title fallback rather than ISBN or title+author. This is
+the graceful-degradation path the spec anticipated (Feature 1 "ISBN risk"). If a
+backend that exposes ISBNs/authors is added later, matching precision improves
+automatically with no code change.
