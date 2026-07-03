@@ -8,7 +8,7 @@ from app import _normalize_ol_doc, _normalize_ol_subject_work
 
 EXPECTED_KEYS = {
     "id", "title", "authors", "publishedDate", "description", "pageCount",
-    "categories", "isbn_13", "isbn_10", "cover", "language",
+    "categories", "isbn_13", "isbn_10", "cover", "language", "match_title",
 }
 
 
@@ -84,6 +84,19 @@ def test_normalize_ol_subject_work_minimal():
     assert out["language"] == "en"
 
 
+def test_ol_doc_attaches_match_title():
+    row = _normalize_ol_doc({
+        "title": "The Hobbit", "author_name": ["J.R.R. Tolkien"], "key": "/works/OL1W"})
+    assert row["match_title"] == "hobbit|jrr tolkien"
+
+
+def test_ol_subject_work_attaches_match_title():
+    row = _normalize_ol_subject_work({
+        "title": "A Study in Scarlet",
+        "authors": [{"name": "Arthur Conan Doyle"}], "key": "/works/OL2W"})
+    assert row["match_title"] == "study in scarlet|arthur conan doyle"
+
+
 def test_hardcover_normalize_book_row_module_level():
     from hardcover import normalize_book_row
     out = normalize_book_row({
@@ -97,3 +110,18 @@ def test_hardcover_normalize_book_row_module_level():
     assert out["publishedDate"] == "2014"
     assert out["cover"] == "http://c/x.jpg"
     assert set(out) == EXPECTED_KEYS
+
+
+def test_normalize_book_row_attaches_match_title():
+    from hardcover import normalize_book_row
+    row = normalize_book_row({
+        "id": 1, "title": "The Way of Kings: Book One",
+        "contributions": [{"author": {"name": "Brandon Sanderson"}}],
+    })
+    assert row["match_title"] == "way of kings|brandon sanderson"
+
+
+def test_normalize_book_row_match_title_no_author():
+    from hardcover import normalize_book_row
+    row = normalize_book_row({"id": 2, "title": "Solo Title"})
+    assert row["match_title"] == "solo title|"

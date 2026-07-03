@@ -15,6 +15,8 @@ import logging
 
 import requests
 
+import matching
+
 logger = logging.getLogger(__name__)
 
 ENDPOINT = "https://api.hardcover.app/v1/graphql"
@@ -92,6 +94,8 @@ def normalize_book_row(book: dict) -> dict:
         "isbn_10": "",
         "cover": cover_url(book.get("cached_image")),
         "language": "en",
+        "match_title": matching.match_key(
+            book.get("title", ""), authors[0] if authors else ""),
     }
 
 
