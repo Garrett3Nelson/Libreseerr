@@ -6,6 +6,7 @@ let slotOptionsCache = {};
 let currentUser = null;
 let editingUsername = null;
 let cachedAvailability = null;
+let modalOwnership = { ebook: false, audiobook: false };
 
 // Inline SVG fallback cover. Self-contained (no network) so a missing/broken
 // cover can never trigger a failing request. The old fallback pointed at
@@ -470,8 +471,25 @@ function hideFullyOwnedFlatCards(availability) {
 async function openDownloadModal(book) {
     currentModalBook = book;
     selectedServers = new Set();
-    if (serverConfigured.ebook) selectedServers.add("ebook");
-    else if (serverConfigured.audiobook) selectedServers.add("audiobook");
+
+    // Determine owned state so we can default to the MISSING format.
+    const availability = await fetchAvailability();
+    const own = bookOwnership(book, availability);
+    modalOwnership = {
+        ebook: serverConfigured.ebook && (own.hasEbook || own.ebookRequested),
+        audiobook: serverConfigured.audiobook && (own.hasAudiobook || own.audiobookRequested),
+    };
+
+    // Pre-select each configured-but-not-owned slot; fall back to the first
+    // configured slot if somehow all are owned (shouldn't happen — such books
+    // are hidden — but keeps the modal usable if opened directly).
+    for (const slot of ["ebook", "audiobook"]) {
+        if (serverConfigured[slot] && !modalOwnership[slot]) selectedServers.add(slot);
+    }
+    if (!selectedServers.size) {
+        if (serverConfigured.ebook) selectedServers.add("ebook");
+        else if (serverConfigured.audiobook) selectedServers.add("audiobook");
+    }
 
     document.getElementById("modal-title").textContent = "Download: " + (book.title || "Unknown");
     renderServerButtons();
@@ -489,13 +507,19 @@ function renderServerButtons() {
         const slot = btn.dataset.server;
         const label = slot === "ebook" ? "Ebook" : "Audiobook";
         const configured = serverConfigured[slot];
-        btn.disabled = !configured;
-        btn.classList.toggle("disabled", !configured);
-        btn.title = configured
-            ? ""
-            : `${label} server isn't configured. Configure it in Settings to request this format.`;
+        const owned = modalOwnership[slot];
+        btn.disabled = !configured || owned;
+        btn.classList.toggle("disabled", !configured || owned);
+        btn.classList.toggle("owned", !!owned);
+        if (!configured) {
+            btn.title = `${label} server isn't configured. Configure it in Settings to request this format.`;
+        } else if (owned) {
+            btn.title = `${label} is already in your library.`;
+        } else {
+            btn.title = "";
+        }
         btn.classList.toggle("active", selectedServers.has(slot));
-        btn.onclick = configured ? () => { toggleServer(slot).catch(console.error); } : null;
+        btn.onclick = (configured && !owned) ? () => { toggleServer(slot).catch(console.error); } : null;
     });
 }
 

@@ -510,6 +510,14 @@ body.is-admin .sidebar-role {
     cursor: not-allowed;
 }
 
+.server-btn.owned::after {
+    content: "In library";
+    display: block;
+    font-size: 0.6rem;
+    text-transform: none;
+    opacity: 0.8;
+}
+
 .slot-section { margin-top: 0.75rem; }
 .slot-heading {
     margin: 0.5rem 0 0.25rem;
