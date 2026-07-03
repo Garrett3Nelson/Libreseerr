@@ -210,28 +210,44 @@ async function fetchAvailability() {
     return cachedAvailability;
 }
 
+// Title-only prefix of a match key ("normtitle|author" -> "normtitle|").
+// Bridges the case where one side knows the author and the other doesn't —
+// pure string op, no normalization in JS (that lives in Python matching.py).
+function titleOnlyKey(matchTitle) {
+    if (!matchTitle) return "";
+    return matchTitle.split("|")[0] + "|";
+}
+
+function slotHas(set, isbn, matchTitle) {
+    if (!set) return false;
+    if (isbn && set.isbns.includes(isbn)) return true;
+    if (matchTitle && set.titles.includes(matchTitle)) return true;
+    const prefix = titleOnlyKey(matchTitle);
+    return !!prefix && set.titles.includes(prefix);
+}
+
+// Central owned/requested check for one book against /api/availability.
+function bookOwnership(book, availability) {
+    const isbn = book.isbn_13 || book.isbn_10 || book.isbn13 || book.isbn10 || "";
+    const key = book.match_title || "";
+    return {
+        hasEbook: slotHas(availability.ebook, isbn, key),
+        hasAudiobook: slotHas(availability.audiobook, isbn, key),
+        ebookRequested: slotHas(availability.ebook_requests, isbn, key),
+        audiobookRequested: slotHas(availability.audiobook_requests, isbn, key),
+    };
+}
+
 function applyAvailabilityBadges(availability) {
     document.querySelectorAll(".book-card").forEach((card) => {
         if (card.querySelector(".book-badges")) return;
         let book;
         try { book = JSON.parse(card.dataset.book); } catch { return; }
-        const isbn = book.isbn_13 || book.isbn_10 || book.isbn13 || book.isbn10 || "";
-        const title = (book.title || "").toLowerCase();
-
-        const hasEbook = (isbn && availability.ebook.isbns.includes(isbn)) ||
-            (title && availability.ebook.titles.includes(title));
-        const hasAudiobook = (isbn && availability.audiobook.isbns.includes(isbn)) ||
-            (title && availability.audiobook.titles.includes(title));
-        const ebookRequested = availability.ebook_requests &&
-            ((isbn && availability.ebook_requests.isbns.includes(isbn)) ||
-            (title && availability.ebook_requests.titles.includes(title)));
-        const audiobookRequested = availability.audiobook_requests &&
-            ((isbn && availability.audiobook_requests.isbns.includes(isbn)) ||
-            (title && availability.audiobook_requests.titles.includes(title)));
+        const own = bookOwnership(book, availability);
 
         // "Requested" takes priority over "available" for the same server type
-        const showEbook = ebookRequested ? "requested" : (hasEbook ? "available" : null);
-        const showAudiobook = audiobookRequested ? "requested" : (hasAudiobook ? "available" : null);
+        const showEbook = own.ebookRequested ? "requested" : (own.hasEbook ? "available" : null);
+        const showAudiobook = own.audiobookRequested ? "requested" : (own.hasAudiobook ? "available" : null);
 
         if (!showEbook && !showAudiobook) return;
 
