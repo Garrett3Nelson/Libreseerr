@@ -25,6 +25,7 @@ try:
 except ImportError:
     OIDC_AVAILABLE = False
 
+import recommendations
 from bookshelf import BookshelfClient
 from hardcover import HardcoverClient
 from lazylibrarian import LazyLibrarianClient
@@ -766,6 +767,7 @@ def get_config():
             "server_software": config["audiobook"].get("server_software", "readarr"),
             "configured": bool(config["audiobook"].get("url") and config["audiobook"].get("api_key")),
         },
+        "hardcover_enabled": bool(config.get("hardcover", {}).get("token")),
     })
 
 
@@ -915,6 +917,8 @@ def _discover_from_openlibrary(category):
 @login_required
 def discover_books():
     category = request.args.get("category", "").strip()
+    if category in recommendations.PERSONALIZED_CATEGORIES:
+        return _discover_personalized(category)
     if not category or category not in _DISCOVER_CATEGORIES:
         return jsonify({"error": "Invalid category"}), 400
 
@@ -935,6 +939,25 @@ def discover_books():
         return jsonify(results)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+def _discover_personalized(category):
+    """Hardcover-only personal rows (Continue the Series, More From Authors,
+    Want-to-Read). Gated on a configured token; any failure degrades to [] so
+    the discovery page always renders. The library is fetched once and all three
+    rows are cached together under the existing (source, category) cache."""
+    client = get_metadata_client()
+    if not client:
+        return jsonify([])
+    cache_key = ("hardcover", category)
+    cached = _discover_cache.get(cache_key)
+    if cached and (time.time() - cached[0]) < _DISCOVER_CACHE_TTL:
+        return jsonify(cached[1])
+    rows = recommendations.build_all(client)  # never raises
+    now = time.time()
+    for cat, items in rows.items():
+        _discover_cache[("hardcover", cat)] = (now, items)
+    return jsonify(rows.get(category, []))
 
 
 @app.route("/api/search")
