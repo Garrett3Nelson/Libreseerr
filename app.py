@@ -25,6 +25,7 @@ try:
 except ImportError:
     OIDC_AVAILABLE = False
 
+import matching
 import recommendations
 from bookshelf import BookshelfClient
 from hardcover import HardcoverClient
@@ -842,6 +843,8 @@ def _normalize_ol_doc(doc):
         "cover": cover,
         "language": (doc.get("language", ["en"])[0]
                      if doc.get("language") else "en"),
+        "match_title": matching.match_key(
+            doc.get("title", ""), (doc.get("author_name") or [""])[0]),
     }
 
 
@@ -870,6 +873,8 @@ def _normalize_ol_subject_work(work):
         "isbn_10": "",
         "cover": cover,
         "language": "en",
+        "match_title": matching.match_key(
+            work.get("title", ""), authors[0] if authors else ""),
     }
 
 
