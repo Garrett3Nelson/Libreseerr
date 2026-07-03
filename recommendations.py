@@ -117,6 +117,20 @@ _BOX_SET_RE = re.compile(
 # Parenthetical alternate/foreign editions: "(German Edition)", "(French)", etc.
 _ALT_EDITION_RE = re.compile(
     r"\([^)]*\b(?:edition|language|prime|translation)\b[^)]*\)", re.I)
+# Series-name qualifiers to strip: "(Publication Order)", "(Chronological)", etc.
+_SERIES_QUALIFIER_RE = re.compile(
+    r"\s*\([^)]*\b(?:order|publication|chronolog|omnibus)\b[^)]*\)", re.I)
+_TRAILING_SERIES_RE = re.compile(r"\s+series\s*$", re.I)
+
+
+def clean_series_name(name) -> str:
+    """Strip parenthetical order/publication/chronological/omnibus qualifiers and a
+    trailing 'Series', then collapse whitespace. Pure, empty-safe."""
+    if not name:
+        return ""
+    text = _SERIES_QUALIFIER_RE.sub("", str(name))
+    text = _TRAILING_SERIES_RE.sub("", text)
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def _has_cover(book):

@@ -28,6 +28,28 @@ _LIB = {"me": [{"user_books": [
 ]}]}
 
 
+def test_clean_series_name_strips_order_qualifier():
+    assert rec.clean_series_name("Ender's Game (Publication Order)") == "Ender's Game"
+
+
+def test_clean_series_name_strips_various_qualifiers():
+    assert rec.clean_series_name("Discworld (Chronological Order)") == "Discworld"
+    assert rec.clean_series_name("Foundation (Omnibus)") == "Foundation"
+
+
+def test_clean_series_name_strips_trailing_series_word():
+    assert rec.clean_series_name("Stormlight Archive Series") == "Stormlight Archive"
+
+
+def test_clean_series_name_noop_on_clean_name():
+    assert rec.clean_series_name("The Wheel of Time") == "The Wheel of Time"
+
+
+def test_clean_series_name_empty_safe():
+    assert rec.clean_series_name("") == ""
+    assert rec.clean_series_name(None) == ""
+
+
 def test_parse_library_partitions_by_status():
     lib = rec.parse_library(_LIB)
     assert lib.read_ids == {100, 101}
