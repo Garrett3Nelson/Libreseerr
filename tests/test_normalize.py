@@ -82,3 +82,18 @@ def test_normalize_ol_subject_work_minimal():
     assert out["authors"] == []
     assert out["cover"] == ""
     assert out["language"] == "en"
+
+
+def test_hardcover_normalize_book_row_module_level():
+    from hardcover import normalize_book_row
+    out = normalize_book_row({
+        "id": 42, "title": "Words of Radiance", "release_date": "2014-03-04",
+        "cached_image": {"url": "http://c/x.jpg"},
+        "contributions": [{"author": {"name": "Brandon Sanderson"}}],
+    })
+    assert out["id"] == "42"
+    assert out["title"] == "Words of Radiance"
+    assert out["authors"] == ["Brandon Sanderson"]
+    assert out["publishedDate"] == "2014"
+    assert out["cover"] == "http://c/x.jpg"
+    assert set(out) == EXPECTED_KEYS
