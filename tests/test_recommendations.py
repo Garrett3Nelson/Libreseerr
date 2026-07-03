@@ -149,3 +149,43 @@ def test_want_to_read_recency_order_and_cap():
     out = rec.select_want_to_read(lib)
     assert [b["id"] for b in out] == ["301", "300"]  # newest date_added first
     assert out[0]["authors"] == ["Y"]
+
+
+class _FakeHC:
+    """Dispatches _post by query content; returns canned payloads."""
+
+    def __init__(self, expansion=None, authors=None, raise_on=None):
+        self.expansion = expansion if expansion is not None else _EXPANSION
+        self.authors = authors if authors is not None else {"books": []}
+        self.raise_on = raise_on or set()
+
+    def _post(self, query, variables=None):
+        if "user_books" in query:
+            if "library" in self.raise_on:
+                raise ValueError("boom")
+            return _LIB
+        if "book_series" in query:
+            if "series" in self.raise_on:
+                raise ValueError("boom")
+            return self.expansion
+        if "books(" in query:
+            return self.authors
+        return {}
+
+
+def test_build_all_returns_three_rows():
+    out = rec.build_all(_FakeHC())
+    assert set(out) == set(rec.PERSONALIZED_CATEGORIES)
+    assert [b["id"] for b in out["continue_series"]] == ["102", "103", "104"]
+    assert [b["id"] for b in out["want_to_read"]] == ["301", "300"]
+
+
+def test_build_all_library_failure_all_empty():
+    out = rec.build_all(_FakeHC(raise_on={"library"}))
+    assert out == {c: [] for c in rec.PERSONALIZED_CATEGORIES}
+
+
+def test_build_all_row_failure_isolated():
+    out = rec.build_all(_FakeHC(raise_on={"series"}))
+    assert out["continue_series"] == []          # this row degraded
+    assert [b["id"] for b in out["want_to_read"]] == ["301", "300"]  # others fine

@@ -197,3 +197,94 @@ def select_want_to_read(library: Library) -> list:
     """The account's Want-to-Read shelf, most-recently-added first."""
     items = sorted(library.want, key=lambda w: w.get("date_added") or "", reverse=True)
     return [hardcover.normalize_book_row(w["book"]) for w in items[:ROW_LIMIT]]
+
+
+# ─── Queries ───
+#
+# Depth constraint: Hardcover caps GraphQL query depth at 3, but JSON *scalar*
+# columns (cached_image, cached_featured_series) don't add depth. These shapes
+# were verified live against a real account during design (see the spec).
+
+LIBRARY_QUERY = """
+query Library {
+  me {
+    user_books {
+      status_id
+      date_added
+      book {
+        id
+        title
+        cached_image
+        cached_featured_series
+        contributions(limit: 2) { author { id name } }
+      }
+    }
+  }
+}
+"""
+
+SERIES_QUERY = """
+query SeriesExpand($ids: [Int!]) {
+  series(where: {id: {_in: $ids}}) {
+    id name books_count primary_books_count
+    book_series(order_by: {position: asc}, limit: 40) {
+      position
+      book {
+        id title release_date cached_image compilation users_count
+        contributions(limit: 2) { author { name } }
+      }
+    }
+  }
+}
+"""
+
+BY_AUTHORS_QUERY = """
+query ByAuthors($aids: [Int!]) {
+  books(where: {contributions: {author_id: {_in: $aids}}, users_count: {_gte: %d}},
+        order_by: {users_count: desc}, limit: 30) {
+    id title release_date users_count cached_image compilation
+    contributions(limit: 2) { author { name } }
+  }
+}
+""" % AUTHOR_MIN_USERS
+
+
+def _safe_row(name, fn):
+    """Run one row builder; a failure degrades to [] and must never 500 the page."""
+    try:
+        return fn()
+    except Exception as e:  # noqa: BLE001 - deliberately broad: one row must not break the page
+        logger.warning("recommendation row %s failed: %s", name, e)
+        return []
+
+
+def build_all(client) -> dict:
+    """Build all three personal rows, fetching the Hardcover library once.
+
+    ``client`` is any object exposing ``_post(query, variables=None) -> dict``
+    (the real HardcoverClient, or a fake in tests). Never raises: a library-fetch
+    failure yields all-empty rows; a single row's failure degrades only that row.
+    """
+    try:
+        library = parse_library(client._post(LIBRARY_QUERY))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Hardcover library fetch failed: %s", e)
+        return {c: [] for c in PERSONALIZED_CATEGORIES}
+
+    def _continue():
+        ids = list(library.series_progress)
+        if not ids:
+            return []
+        return select_continue_series(library, client._post(SERIES_QUERY, {"ids": ids}))
+
+    def _authors():
+        if not library.author_ids:
+            return []
+        return select_more_by_authors(
+            library, client._post(BY_AUTHORS_QUERY, {"aids": library.author_ids}))
+
+    return {
+        "continue_series": _safe_row("continue_series", _continue),
+        "more_by_authors": _safe_row("more_by_authors", _authors),
+        "want_to_read": _safe_row("want_to_read", lambda: select_want_to_read(library)),
+    }
