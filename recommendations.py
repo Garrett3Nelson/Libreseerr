@@ -240,13 +240,13 @@ query SeriesExpand($ids: [Int!]) {
 
 BY_AUTHORS_QUERY = """
 query ByAuthors($aids: [Int!]) {
-  books(where: {contributions: {author_id: {_in: $aids}}, users_count: {_gte: %d}},
+  books(where: {contributions: {author_id: {_in: $aids}}, users_count: {_gte: __MIN_USERS__}},
         order_by: {users_count: desc}, limit: 30) {
     id title release_date users_count cached_image compilation
     contributions(limit: 2) { author { name } }
   }
 }
-""" % AUTHOR_MIN_USERS
+""".replace("__MIN_USERS__", str(AUTHOR_MIN_USERS))
 
 
 def _safe_row(name, fn):

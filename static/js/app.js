@@ -21,6 +21,16 @@ const NO_COVER = "data:image/svg+xml," + encodeURIComponent(
 );
 window.NO_COVER = NO_COVER;
 
+// Hardcover-driven personal rows, pinned above the generic ones. Only shown
+// when a Hardcover token is configured (hardcoverEnabled, from /api/config).
+// Empty rows are hidden by loadDiscovery's existing zero-length check.
+const PERSONAL_CATEGORIES = [
+    { key: "continue_series", title: "Continue the Series" },
+    { key: "more_by_authors", title: "More From Authors You've Read" },
+    { key: "want_to_read", title: "On Your Want-to-Read List" },
+];
+let hardcoverEnabled = false;
+
 const DISCOVERY_CATEGORIES = [
     { key: "new_releases", title: "New Releases" },
     { key: "trending", title: "Trending" },
@@ -255,7 +265,10 @@ async function loadDiscovery() {
 
     container.innerHTML = '<div class="discovery-loading"><div class="spinner"></div> Loading discovery...</div>';
 
-    const promises = DISCOVERY_CATEGORIES.map(async (cat) => {
+    const categories = hardcoverEnabled
+        ? [...PERSONAL_CATEGORIES, ...DISCOVERY_CATEGORIES]
+        : DISCOVERY_CATEGORIES;
+    const promises = categories.map(async (cat) => {
         try {
             const resp = await fetch("/api/discover?category=" + encodeURIComponent(cat.key) + "&limit=20");
             const data = await resp.json();
@@ -530,6 +543,7 @@ async function loadConfig() {
         const resp = await fetch("/api/config");
         const data = await resp.json();
         serverConfigured = { ebook: !!data.ebook.configured, audiobook: !!data.audiobook.configured };
+        hardcoverEnabled = !!data.hardcover_enabled;
         slotOptionsCache = {};
         document.getElementById("ebook-url").value = data.ebook.url || "";
         document.getElementById("ebook-api").value = data.ebook.api_key || "";
@@ -989,7 +1003,7 @@ window.testHardcover = async function () {
 // ─── Init ───
 
 // Load current user first, then the rest
-loadCurrentUser().then(() => {
-    loadConfig();
+loadCurrentUser().then(async () => {
+    await loadConfig();  // sets hardcoverEnabled before discovery builds its rows
     loadDiscovery();
 });
