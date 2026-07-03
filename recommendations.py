@@ -25,7 +25,7 @@ STATUS_READING = 2
 STATUS_READ = 3
 
 ROW_LIMIT = 20
-PER_CARD_CAP = 12
+SERIES_ENTRIES_CAP = 60   # whole-series card guard; real primary series don't reach this
 AUTHOR_MIN_USERS = 50
 
 
@@ -156,19 +156,26 @@ def _is_unreleased(book, today):
 
 
 def select_continue_series(library: Library, data: dict) -> list:
-    """Grouped upcoming installments per partly-read series, ordered by the user's
-    most-recent read activity. Returns a list of series groups::
+    """Grouped per partly-read series, ordered by most-recent read activity.
+    Each group carries the WHOLE primary run so the frontend arrows can scroll the
+    entire series::
 
         {"series_id": int, "series_name": str,  # cleaned
-         "entries": [ { **normalized_book, "position": int, "released": bool }, ... ]}
+         "series_total": int,                    # label denominator
+         "entries": [ { **normalized_book, "position": int,
+                        "released": bool, "read": bool }, ... ]}
 
-    Each integer position is one installment; we pick the *canonical* edition
-    (most readers, then has-cover) and apply the content filters to it — so a
-    compilation/already-read installment is dropped rather than falling back to a
-    low-quality foreign edition. Unreleased installments are INCLUDED and flagged
-    ``released: False`` so the frontend arrows can reach them. Entries are ordered
-    by ascending position and capped at ``PER_CARD_CAP``; series are ordered by
-    recency and capped at ``ROW_LIMIT`` cards.
+    Entries are every primary installment (positions ``1..primary_books_count``)
+    with a valid canonical edition, ascending. Read positions (at/below the
+    furthest-read book, or any position whose edition the user has read) are
+    INCLUDED and flagged ``read: True``, preferring the actually-read edition —
+    these are the left-hand context the arrows scroll back through. Upcoming
+    (not-read) positions keep the content filters (canonical edition, drop
+    compilation/noise/already-read) and are flagged ``read: False``; unreleased
+    ones are included and flagged ``released: False``. A series is emitted only if
+    it has at least one upcoming installment to get, so which series appear is
+    unchanged. Capped at ``SERIES_ENTRIES_CAP`` entries; series ordered by recency
+    and capped at ``ROW_LIMIT``.
     """
     today = datetime.date.today().isoformat()
     groups_out = []  # (last_date, group dict)
@@ -178,25 +185,33 @@ def select_continue_series(library: Library, data: dict) -> list:
             continue
         furthest = prog["furthest"]
         primary_count = s.get("primary_books_count") or 0
-        # Positions where the user already read *any* edition — stops a foreign
-        # edition of a read installment slipping in at its slot.
+        # Positions where the user read *any* edition — treated as read even if the
+        # specific edition below isn't the one they logged.
         read_positions = {
             _parse_int_position(bs.get("position"))
             for bs in s.get("book_series") or []
             if (bs.get("book") or {}).get("id") in library.excluded_ids
         }
         read_positions.discard(None)
-        # Group all editions by integer position.
+        # Group all editions by integer position across the whole primary run.
         editions_by_pos = {}
         for bs in s.get("book_series") or []:
             pos = _parse_int_position(bs.get("position"))
-            if pos is None or pos <= furthest or pos in read_positions:
+            if pos is None:
                 continue
             if primary_count and pos > primary_count:
                 continue
             editions_by_pos.setdefault(pos, []).append(bs.get("book") or {})
-        canonical_by_pos = {}  # position -> canonical book that survived filtering
+        # Pick a canonical edition per position; (book, is_read) survives filtering.
+        canonical_by_pos = {}
         for pos, editions in editions_by_pos.items():
+            is_read = pos <= furthest or pos in read_positions
+            if is_read:
+                # Prefer the edition the user actually read; else best-ranked.
+                read_ed = next(
+                    (b for b in editions if b.get("id") in library.excluded_ids), None)
+                canonical_by_pos[pos] = (read_ed or max(editions, key=_rank), True)
+                continue
             canonical = max(editions, key=_rank)
             if canonical.get("compilation"):
                 continue
@@ -204,20 +219,24 @@ def select_continue_series(library: Library, data: dict) -> list:
                 continue
             if _is_noise(canonical.get("title", "")):
                 continue
-            canonical_by_pos[pos] = canonical
-        positions = sorted(canonical_by_pos)[:PER_CARD_CAP]
-        if not positions:
+            canonical_by_pos[pos] = (canonical, False)
+        # Gate: keep the series only if there's an upcoming installment to get.
+        if not any(not is_read for _, is_read in canonical_by_pos.values()):
             continue
+        positions = sorted(canonical_by_pos)[:SERIES_ENTRIES_CAP]
         entries = []
         for pos in positions:
-            book = canonical_by_pos[pos]
+            book, is_read = canonical_by_pos[pos]
             entry = hardcover.normalize_book_row(book)
             entry["position"] = pos
             entry["released"] = not _is_unreleased(book, today)
+            entry["read"] = is_read
             entries.append(entry)
+        series_total = primary_count or (positions[-1] if positions else 0)
         groups_out.append((prog["last_date"], {
             "series_id": s.get("id"),
             "series_name": clean_series_name(s.get("name") or prog.get("name") or ""),
+            "series_total": series_total,
             "entries": entries,
         }))
     groups_out.sort(key=lambda g: g[0], reverse=True)

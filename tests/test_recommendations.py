@@ -97,7 +97,7 @@ _EXPANSION = {"series": [{
 
 
 def _entries(group):
-    return [(e["id"], e["position"], e["released"]) for e in group["entries"]]
+    return [(e["id"], e["position"], e["released"], e["read"]) for e in group["entries"]]
 
 
 def test_continue_series_grouped_shape_and_positions():
@@ -107,8 +107,11 @@ def test_continue_series_grouped_shape_and_positions():
     group = out[0]
     assert group["series_id"] == 1
     assert group["series_name"] == "Stormlight"
-    # furthest read = 2; primary run <=5 -> positions 3,4,5 in order, all released
-    assert _entries(group) == [("102", 3, True), ("103", 4, True), ("104", 5, True)]
+    assert group["series_total"] == 5  # primary_books_count
+    # Whole primary run 1..5: read 1-2 (canonical read edition), upcoming 3-5.
+    assert _entries(group) == [
+        ("100", 1, True, True), ("101", 2, True, True),
+        ("102", 3, True, False), ("103", 4, True, False), ("104", 5, True, False)]
 
 
 def test_continue_series_filters_noise_fractional_and_beyond_primary():
@@ -133,8 +136,9 @@ def test_continue_series_unreleased_flagged_not_dropped():
                                  "release_date": "2020-01-01", "cached_image": {"url": "c"}}},
     ]}]}
     out = rec.select_continue_series(lib, data)
-    # unreleased installment is INCLUDED, flagged released=False, in position order
-    assert _entries(out[0]) == [("30", 2, False), ("31", 3, True)]
+    # No book_series row for position 1, so entries start at 2. Unreleased INCLUDED,
+    # flagged released=False; neither is a read position.
+    assert _entries(out[0]) == [("30", 2, False, False), ("31", 3, True, False)]
 
 
 def test_continue_series_canonical_edition_pick():
@@ -162,22 +166,25 @@ def test_continue_series_drops_position_when_canonical_is_compilation():
     assert out == []  # whole series dropped: no valid entries
 
 
-def test_continue_series_excludes_read_position_across_editions():
+def test_continue_series_includes_read_position_with_read_flag():
     lib = rec.parse_library({"me": [{"user_books": [
         {"status_id": 3, "date_added": "2026-01-01", "book": {
             "id": 50, "title": "Book Three (English)",
-            "cached_featured_series": {"series": {"id": 9, "name": "S"}, "details": "1"}}},
+            "cached_featured_series": {"series": {"id": 9, "name": "S"}, "details": "3"}}},
     ]}]})
     data = {"series": [{"id": 9, "name": "S", "primary_books_count": 5, "book_series": [
         _bs(2, 60, "Book Two"),
-        _bs(3, 50, "Book Three (English)"),   # already read -> excluded by id
-        _bs(3, 51, "Buch Drei", users=0),     # foreign ed. of read book -> drop
+        _bs(3, 50, "Book Three (English)"),   # already read -> canonical read edition
+        _bs(3, 51, "Buch Drei", users=0),     # foreign ed. of read book -> not canonical
         _bs(4, 70, "Book Four"),
     ]}]}
     out = rec.select_continue_series(lib, data)
     ids = [e["id"] for e in out[0]["entries"]]
-    assert "51" not in ids
-    assert ids == ["60", "70"]
+    assert "51" not in ids                      # foreign edition of read book dropped
+    assert ids == ["60", "50", "70"]            # read installment kept as context
+    by_id = {e["id"]: e for e in out[0]["entries"]}
+    assert by_id["50"]["read"] is True          # position 3 flagged read
+    assert by_id["70"]["read"] is False         # position 4 still upcoming
 
 
 def test_continue_series_orders_series_by_recency():
@@ -218,10 +225,10 @@ def test_continue_series_caps_entries_per_card():
             "id": 1, "title": "One",
             "cached_featured_series": {"series": {"id": 7, "name": "S"}, "details": "1"}}},
     ]}]})
-    bs = [_bs(p, 100 + p, f"Book {p}") for p in range(2, 40)]
+    bs = [_bs(p, 100 + p, f"Book {p}") for p in range(2, 80)]  # 78 upcoming positions
     data = {"series": [{"id": 7, "name": "S", "primary_books_count": 100, "book_series": bs}]}
     out = rec.select_continue_series(lib, data)
-    assert len(out[0]["entries"]) == rec.PER_CARD_CAP
+    assert len(out[0]["entries"]) == rec.SERIES_ENTRIES_CAP
 
 
 def test_more_by_authors_excludes_read_and_compilations():
@@ -281,7 +288,9 @@ def test_build_all_returns_three_rows():
     assert set(out) == set(rec.PERSONALIZED_CATEGORIES)
     groups = out["continue_series"]
     assert [g["series_id"] for g in groups] == [1]
-    assert [e["id"] for e in groups[0]["entries"]] == ["102", "103", "104"]
+    # Whole primary run now included: read 100,101 then upcoming 102,103,104.
+    assert [e["id"] for e in groups[0]["entries"]] == ["100", "101", "102", "103", "104"]
+    assert groups[0]["series_total"] == 5
     assert [b["id"] for b in out["want_to_read"]] == ["301", "300"]
 
 
