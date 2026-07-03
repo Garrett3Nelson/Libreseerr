@@ -25,7 +25,7 @@ STATUS_READING = 2
 STATUS_READ = 3
 
 ROW_LIMIT = 20
-PER_SERIES_CAP = 3
+PER_CARD_CAP = 12
 AUTHOR_MIN_USERS = 50
 
 
@@ -156,25 +156,30 @@ def _is_unreleased(book, today):
 
 
 def select_continue_series(library: Library, data: dict) -> list:
-    """Next unread primary entries per partly-read series, ordered by the user's
-    most-recent read activity. Returns normalized book dicts (shared schema).
+    """Grouped upcoming installments per partly-read series, ordered by the user's
+    most-recent read activity. Returns a list of series groups::
 
-    Each integer position is one installment. We pick the *canonical* edition
-    (most readers, then has-cover) to represent that installment, then apply the
-    content filters to it — so a compilation/already-read/unreleased installment
-    is dropped entirely rather than falling back to a low-quality foreign edition.
+        {"series_id": int, "series_name": str,  # cleaned
+         "entries": [ { **normalized_book, "position": int, "released": bool }, ... ]}
+
+    Each integer position is one installment; we pick the *canonical* edition
+    (most readers, then has-cover) and apply the content filters to it — so a
+    compilation/already-read installment is dropped rather than falling back to a
+    low-quality foreign edition. Unreleased installments are INCLUDED and flagged
+    ``released: False`` so the frontend arrows can reach them. Entries are ordered
+    by ascending position and capped at ``PER_CARD_CAP``; series are ordered by
+    recency and capped at ``ROW_LIMIT`` cards.
     """
     today = datetime.date.today().isoformat()
-    blocks = []  # (last_date, [book dicts in position order])
+    groups_out = []  # (last_date, group dict)
     for s in data.get("series") or []:
         prog = library.series_progress.get(s.get("id"))
         if not prog:
             continue
         furthest = prog["furthest"]
         primary_count = s.get("primary_books_count") or 0
-        # Positions where the user already read *any* edition. cached_featured_series
-        # only gives an approximate "furthest"; this catches installments read out of
-        # order and stops a foreign edition of a read book slipping in at its slot.
+        # Positions where the user already read *any* edition — stops a foreign
+        # edition of a read installment slipping in at its slot.
         read_positions = {
             _parse_int_position(bs.get("position"))
             for bs in s.get("book_series") or []
@@ -182,16 +187,16 @@ def select_continue_series(library: Library, data: dict) -> list:
         }
         read_positions.discard(None)
         # Group all editions by integer position.
-        groups = {}
+        editions_by_pos = {}
         for bs in s.get("book_series") or []:
             pos = _parse_int_position(bs.get("position"))
             if pos is None or pos <= furthest or pos in read_positions:
                 continue
             if primary_count and pos > primary_count:
                 continue
-            groups.setdefault(pos, []).append(bs.get("book") or {})
-        by_pos = {}  # position -> canonical book that survived filtering
-        for pos, editions in groups.items():
+            editions_by_pos.setdefault(pos, []).append(bs.get("book") or {})
+        canonical_by_pos = {}  # position -> canonical book that survived filtering
+        for pos, editions in editions_by_pos.items():
             canonical = max(editions, key=_rank)
             if canonical.get("compilation"):
                 continue
@@ -199,24 +204,24 @@ def select_continue_series(library: Library, data: dict) -> list:
                 continue
             if _is_noise(canonical.get("title", "")):
                 continue
-            if _is_unreleased(canonical, today):
-                continue
-            by_pos[pos] = canonical
-        positions = sorted(by_pos)[:PER_SERIES_CAP]
-        if positions:
-            blocks.append((prog["last_date"], [by_pos[p] for p in positions]))
-    blocks.sort(key=lambda b: b[0], reverse=True)
-    out, seen = [], set()
-    for _, books in blocks:
-        for book in books:
-            bid = book.get("id")
-            if bid in seen:
-                continue
-            seen.add(bid)
-            out.append(hardcover.normalize_book_row(book))
-            if len(out) >= ROW_LIMIT:
-                return out
-    return out
+            canonical_by_pos[pos] = canonical
+        positions = sorted(canonical_by_pos)[:PER_CARD_CAP]
+        if not positions:
+            continue
+        entries = []
+        for pos in positions:
+            book = canonical_by_pos[pos]
+            entry = hardcover.normalize_book_row(book)
+            entry["position"] = pos
+            entry["released"] = not _is_unreleased(book, today)
+            entries.append(entry)
+        groups_out.append((prog["last_date"], {
+            "series_id": s.get("id"),
+            "series_name": clean_series_name(s.get("name") or prog.get("name") or ""),
+            "entries": entries,
+        }))
+    groups_out.sort(key=lambda g: g[0], reverse=True)
+    return [g for _, g in groups_out[:ROW_LIMIT]]
 
 
 def select_more_by_authors(library: Library, data: dict) -> list:

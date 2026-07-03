@@ -96,32 +96,88 @@ _EXPANSION = {"series": [{
 }]}
 
 
-def test_continue_series_next_after_furthest():
-    lib = rec.parse_library(_LIB)
-    out = rec.select_continue_series(lib, _EXPANSION)
-    ids = [b["id"] for b in out]
-    # furthest read = 2; primary run <=5; cap 3 per series -> positions 3,4,5
-    assert ids == ["102", "103", "104"]
+def _entries(group):
+    return [(e["id"], e["position"], e["released"]) for e in group["entries"]]
 
 
-def test_continue_series_excludes_and_filters():
+def test_continue_series_grouped_shape_and_positions():
     lib = rec.parse_library(_LIB)
     out = rec.select_continue_series(lib, _EXPANSION)
-    titles = [b["title"] for b in out]
-    assert "Edgedancer" not in titles              # fractional dropped
-    assert "Beyond Primary" not in titles          # beyond primary run
+    assert len(out) == 1
+    group = out[0]
+    assert group["series_id"] == 1
+    assert group["series_name"] == "Stormlight"
+    # furthest read = 2; primary run <=5 -> positions 3,4,5 in order, all released
+    assert _entries(group) == [("102", 3, True), ("103", 4, True), ("104", 5, True)]
+
+
+def test_continue_series_filters_noise_fractional_and_beyond_primary():
+    lib = rec.parse_library(_LIB)
+    out = rec.select_continue_series(lib, _EXPANSION)
+    titles = [e["title"] for e in out[0]["entries"]]
+    assert "Edgedancer" not in titles                 # fractional dropped
+    assert "Beyond Primary" not in titles             # beyond primary run
     assert all("Books 1-4" not in t for t in titles)  # compilation dropped
 
 
-def test_continue_series_dedupes_position_keeping_popular():
+def test_continue_series_unreleased_flagged_not_dropped():
+    lib = rec.parse_library({"me": [{"user_books": [
+        {"status_id": 3, "date_added": "2026-01-01", "book": {
+            "id": 1, "title": "One",
+            "cached_featured_series": {"series": {"id": 7, "name": "S"}, "details": "1"}}},
+    ]}]})
+    data = {"series": [{"id": 7, "name": "S", "primary_books_count": 5, "book_series": [
+        {"position": 2, "book": {"id": 30, "title": "Future Two", "users_count": 100,
+                                 "release_date": "2999-01-01", "cached_image": {"url": "c"}}},
+        {"position": 3, "book": {"id": 31, "title": "Real Three", "users_count": 50,
+                                 "release_date": "2020-01-01", "cached_image": {"url": "c"}}},
+    ]}]}
+    out = rec.select_continue_series(lib, data)
+    # unreleased installment is INCLUDED, flagged released=False, in position order
+    assert _entries(out[0]) == [("30", 2, False), ("31", 3, True)]
+
+
+def test_continue_series_canonical_edition_pick():
     lib = rec.parse_library(_LIB)
     data = {"series": [{
-        "id": 1, "name": "Stormlight", "books_count": 10, "primary_books_count": 5,
+        "id": 1, "name": "Stormlight", "primary_books_count": 5,
         "book_series": [_bs(3, 102, "Oathbringer", users=500),
                         _bs(3, 888, "Oathbringer (French)", users=3)],
     }]}
     out = rec.select_continue_series(lib, data)
-    assert [b["id"] for b in out] == ["102"]
+    assert [e["id"] for e in out[0]["entries"]] == ["102"]
+
+
+def test_continue_series_drops_position_when_canonical_is_compilation():
+    lib = rec.parse_library({"me": [{"user_books": [
+        {"status_id": 3, "date_added": "2026-01-01", "book": {
+            "id": 1, "title": "One",
+            "cached_featured_series": {"series": {"id": 7, "name": "S"}, "details": "1"}}},
+    ]}]})
+    data = {"series": [{"id": 7, "name": "S", "primary_books_count": 5, "book_series": [
+        _bs(2, 20, "Collected Two", users=687, compilation=True),  # canonical, compilation
+        _bs(2, 21, "Zwei", users=0),                               # foreign, non-comp
+    ]}]}
+    out = rec.select_continue_series(lib, data)
+    assert out == []  # whole series dropped: no valid entries
+
+
+def test_continue_series_excludes_read_position_across_editions():
+    lib = rec.parse_library({"me": [{"user_books": [
+        {"status_id": 3, "date_added": "2026-01-01", "book": {
+            "id": 50, "title": "Book Three (English)",
+            "cached_featured_series": {"series": {"id": 9, "name": "S"}, "details": "1"}}},
+    ]}]})
+    data = {"series": [{"id": 9, "name": "S", "primary_books_count": 5, "book_series": [
+        _bs(2, 60, "Book Two"),
+        _bs(3, 50, "Book Three (English)"),   # already read -> excluded by id
+        _bs(3, 51, "Buch Drei", users=0),     # foreign ed. of read book -> drop
+        _bs(4, 70, "Book Four"),
+    ]}]}
+    out = rec.select_continue_series(lib, data)
+    ids = [e["id"] for e in out[0]["entries"]]
+    assert "51" not in ids
+    assert ids == ["60", "70"]
 
 
 def test_continue_series_orders_series_by_recency():
@@ -140,63 +196,32 @@ def test_continue_series_orders_series_by_recency():
          "book_series": [_bs(2, 22, "B2")]},
     ]}
     out = rec.select_continue_series(lib, data)
-    assert [b["id"] for b in out] == ["22", "11"]  # series B (more recent) first
+    assert [g["series_id"] for g in out] == [2, 1]  # series B (more recent) first
 
 
-def test_continue_series_excludes_whole_position_of_read_edition():
-    # The user read the English edition at position 3 (id 50). A foreign edition
-    # (id 51) shares position 3. Neither should be recommended — reading a book
-    # means you've read that installment regardless of edition.
-    lib = rec.parse_library({"me": [{"user_books": [
-        {"status_id": 3, "date_added": "2026-01-01", "book": {
-            "id": 50, "title": "Book Three (English)",
-            "cached_featured_series": {"series": {"id": 9, "name": "S"}, "details": "1"}}},
-    ]}]})
-    data = {"series": [{"id": 9, "name": "S", "primary_books_count": 5, "book_series": [
-        _bs(2, 60, "Book Two"),
-        _bs(3, 50, "Book Three (English)"),   # already read -> excluded by id
-        _bs(3, 51, "Buch Drei", users=0),     # foreign ed. of a read book -> drop
-        _bs(4, 70, "Book Four"),
-    ]}]}
-    out = rec.select_continue_series(lib, data)
-    ids = [b["id"] for b in out]
-    assert "51" not in ids
-    assert ids == ["60", "70"]
-
-
-def test_continue_series_drops_position_when_canonical_is_compilation():
-    # The most-popular edition at a position is a compilation (e.g. an omnibus
-    # fix-up). A less-popular foreign edition shares the slot. The whole position
-    # must be dropped — do NOT substitute the foreign edition.
+def test_continue_series_cleans_series_name():
     lib = rec.parse_library({"me": [{"user_books": [
         {"status_id": 3, "date_added": "2026-01-01", "book": {
             "id": 1, "title": "One",
             "cached_featured_series": {"series": {"id": 7, "name": "S"}, "details": "1"}}},
     ]}]})
-    data = {"series": [{"id": 7, "name": "S", "primary_books_count": 5, "book_series": [
-        _bs(2, 20, "Collected Two", users=687, compilation=True),  # canonical, compilation
-        _bs(2, 21, "Zwei", users=0),                               # foreign, non-comp
-    ]}]}
+    data = {"series": [{"id": 7, "name": "Ender's Game (Publication Order)",
+                        "primary_books_count": 5,
+                        "book_series": [_bs(2, 60, "Book Two")]}]}
     out = rec.select_continue_series(lib, data)
-    assert out == []
+    assert out[0]["series_name"] == "Ender's Game"
 
 
-def test_continue_series_drops_unreleased_next_book():
-    # An announced-but-unreleased next book (future release_date) is not
-    # requestable and must not be recommended; a released one is kept.
+def test_continue_series_caps_entries_per_card():
     lib = rec.parse_library({"me": [{"user_books": [
         {"status_id": 3, "date_added": "2026-01-01", "book": {
             "id": 1, "title": "One",
             "cached_featured_series": {"series": {"id": 7, "name": "S"}, "details": "1"}}},
     ]}]})
-    data = {"series": [{"id": 7, "name": "S", "primary_books_count": 5, "book_series": [
-        {"position": 2, "book": {"id": 30, "title": "Untitled S #2", "users_count": 100,
-                                 "release_date": "2999-01-01", "cached_image": {"url": "c"}}},
-        {"position": 3, "book": {"id": 31, "title": "Real Three", "users_count": 50,
-                                 "release_date": "2020-01-01", "cached_image": {"url": "c"}}},
-    ]}]}
+    bs = [_bs(p, 100 + p, f"Book {p}") for p in range(2, 40)]
+    data = {"series": [{"id": 7, "name": "S", "primary_books_count": 100, "book_series": bs}]}
     out = rec.select_continue_series(lib, data)
-    assert [b["id"] for b in out] == ["31"]
+    assert len(out[0]["entries"]) == rec.PER_CARD_CAP
 
 
 def test_more_by_authors_excludes_read_and_compilations():
@@ -254,7 +279,9 @@ class _FakeHC:
 def test_build_all_returns_three_rows():
     out = rec.build_all(_FakeHC())
     assert set(out) == set(rec.PERSONALIZED_CATEGORIES)
-    assert [b["id"] for b in out["continue_series"]] == ["102", "103", "104"]
+    groups = out["continue_series"]
+    assert [g["series_id"] for g in groups] == [1]
+    assert [e["id"] for e in groups[0]["entries"]] == ["102", "103", "104"]
     assert [b["id"] for b in out["want_to_read"]] == ["301", "300"]
 
 
