@@ -400,7 +400,8 @@ function initSeriesCards(availability) {
         let entries;
         try { entries = JSON.parse(card.dataset.entries); } catch { entries = []; }
         const gap = nextGapIndex(entries, availability);
-        if (gap === -1) { card.remove(); return; }  // fully owned series -> hide
+        // -1 only when every entry is read (backend gate makes this rare/defensive).
+        if (gap === -1) { card.remove(); return; }
         card.dataset.index = String(gap);
         renderSeriesEntry(card, entries);
         card.querySelector(".series-prev").addEventListener("click", () => stepSeries(card, -1));

@@ -204,6 +204,8 @@ def select_continue_series(library: Library, data: dict) -> list:
                 continue
             editions_by_pos.setdefault(pos, []).append(bs.get("book") or {})
         # Pick a canonical edition per position; (book, is_read) survives filtering.
+        # Read positions are left-hand scroll context, so they intentionally skip
+        # the compilation/noise filters below — the read edition is what to show.
         canonical_by_pos = {}
         for pos, editions in editions_by_pos.items():
             is_read = pos <= furthest or pos in read_positions
@@ -225,8 +227,9 @@ def select_continue_series(library: Library, data: dict) -> list:
         if not any(not is_read for _, is_read in canonical_by_pos.values()):
             continue
         # Keep the highest positions: upcoming installments sort highest, so
-        # capping from the top guarantees they're never dropped in favour of
-        # already-read context, and the read books we keep are the most recent.
+        # capping from the top keeps them (and the most recent read context) in
+        # favour of early read books. Real primary series never exceed the cap,
+        # so this only ever matters as a payload guard.
         positions = sorted(canonical_by_pos)[-SERIES_ENTRIES_CAP:]
         entries = []
         for pos in positions:

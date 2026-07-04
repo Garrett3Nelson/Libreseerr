@@ -187,6 +187,26 @@ def test_continue_series_includes_read_position_with_read_flag():
     assert by_id["70"]["read"] is False         # position 4 still upcoming
 
 
+def test_continue_series_read_position_prefers_read_edition_over_rank():
+    # At a read position, the edition the user actually read wins even when a
+    # co-positioned edition ranks higher by popularity — otherwise the card would
+    # show a different edition than the one in the user's history.
+    lib = rec.parse_library({"me": [{"user_books": [
+        {"status_id": 3, "date_added": "2026-01-01", "book": {
+            "id": 50, "title": "Book Three (Read Edition)",
+            "cached_featured_series": {"series": {"id": 9, "name": "S"}, "details": "3"}}},
+    ]}]})
+    data = {"series": [{"id": 9, "name": "S", "primary_books_count": 5, "book_series": [
+        _bs(3, 50, "Book Three (Read Edition)", users=1),    # read, but least popular
+        _bs(3, 52, "Book Three (Deluxe)", users=999),        # higher-ranked edition
+        _bs(4, 70, "Book Four"),                             # upcoming (gate)
+    ]}]}
+    out = rec.select_continue_series(lib, data)
+    by_pos = {e["position"]: e for e in out[0]["entries"]}
+    assert by_pos[3]["id"] == "50"              # read edition chosen over rank
+    assert by_pos[3]["read"] is True
+
+
 def test_continue_series_orders_series_by_recency():
     lib = rec.parse_library({"me": [{"user_books": [
         {"status_id": 3, "date_added": "2026-01-01", "book": {

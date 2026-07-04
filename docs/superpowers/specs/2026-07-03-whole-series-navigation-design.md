@@ -67,9 +67,10 @@ Each group's `entries` becomes **every primary installment**, positions
 ### Cap
 
 Replace the per-card upcoming cap (`PER_CARD_CAP = 12`) with a whole-series cap
-`SERIES_ENTRIES_CAP = 60` applied to the full ascending list. If a series
-exceeds it, the tail (highest positions, typically unreleased) is truncated.
-Real primary series do not reach 60, so this is a payload-size guard only.
+`SERIES_ENTRIES_CAP = 60`. The list keeps the **highest** positions, so upcoming
+installments (which sort highest) are retained and the earliest read books are
+dropped first — the opposite of truncating the tail. Real primary series do not
+reach 60, so this is a payload-size guard only.
 
 ### Frontend navigation & label
 
