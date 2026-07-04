@@ -111,9 +111,19 @@ def parse_library(data: dict) -> Library:
     return lib
 
 
-# Box sets / omnibus editions: "..., Books 1-4", "Boxed Set", "Omnibus", "Bundle".
+# Box sets / omnibus editions, detected by title — Hardcover's `compilation`
+# boolean is unreliable (it flags some single novels), so the title is the signal:
+# "..., Books 1-4", "6 Books Set", "Boxed Set", "Omnibus", "Bundle", "Collection",
+# "The Complete <Series>".
 _BOX_SET_RE = re.compile(
-    r"(books?\s+\d+\s*[-–—]\s*\d+|boxed?\s*set|omnibus|\bbundle\b)", re.I)
+    r"(books?\s+\d+\s*[-–—]\s*\d+"   # "Books 1-4"
+    r"|\d+\s+books?\b"                # "6 Books", "3 Books Set"
+    r"|boxed?\s*set"                 # "Boxed Set" / "Box Set"
+    r"|\bomnibus\b"
+    r"|\bbundle\b"
+    r"|\bcollection\b"               # "... Books Collection"
+    r"|\bcomplete\s+\w)",            # "The Complete Witcher"
+    re.I)
 # Parenthetical alternate/foreign editions: "(German Edition)", "(French)", etc.
 _ALT_EDITION_RE = re.compile(
     r"\([^)]*\b(?:edition|language|prime|translation)\b[^)]*\)", re.I)
@@ -138,8 +148,12 @@ def _has_cover(book):
 
 
 def _rank(book):
-    """Canonical-pick ordering: more readers wins, then having a cover."""
-    return (book.get("users_count") or 0, 1 if _has_cover(book) else 0)
+    """Canonical-pick ordering: more readers wins, then a non-compilation edition
+    over a box set (Hardcover's `compilation` flag as a tiebreaker only), then
+    having a cover."""
+    return (book.get("users_count") or 0,
+            0 if book.get("compilation") else 1,
+            1 if _has_cover(book) else 0)
 
 
 def _is_noise(title):
@@ -217,9 +231,11 @@ def select_continue_series(library: Library, data: dict) -> list:
                     (b for b in editions if b.get("id") in library.excluded_ids), None)
                 canonical_by_pos[pos] = (read_ed or max(editions, key=_rank), True)
                 continue
+            # Box sets are detected by title (_is_noise), not the unreliable
+            # `compilation` flag — which wrongly deletes some single novels (e.g.
+            # the Witcher's "The Time of Contempt"). Ranking already deprioritizes
+            # box sets, so a real installment normally wins its position outright.
             canonical = max(editions, key=_rank)
-            if canonical.get("compilation"):
-                continue
             if canonical.get("id") in library.excluded_ids:
                 continue
             if _is_noise(canonical.get("title", "")):

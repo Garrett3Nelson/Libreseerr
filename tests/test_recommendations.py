@@ -176,18 +176,57 @@ def test_continue_series_canonical_edition_pick():
     assert [e["id"] for e in out[0]["entries"]] == ["102"]
 
 
-def test_continue_series_drops_position_when_canonical_is_compilation():
+def test_continue_series_drops_position_when_canonical_is_box_set_title():
+    # A box set / omnibus is detected by its TITLE (not the unreliable Hardcover
+    # `compilation` flag). When the most-read edition at a position is a box set,
+    # the position is dropped rather than falling back to a foreign edition.
     lib = rec.parse_library({"me": [{"user_books": [
         {"status_id": 3, "date_added": "2026-01-01", "book": {
             "id": 1, "title": "One",
             "cached_featured_series": {"series": {"id": 7, "name": "S"}, "details": "1"}}},
     ]}]})
     data = {"series": [{"id": 7, "name": "S", "primary_books_count": 5, "book_series": [
-        _bs(2, 20, "Collected Two", users=687, compilation=True),  # canonical, compilation
-        _bs(2, 21, "Zwei", users=0),                               # foreign, non-comp
+        _bs(2, 20, "S: Books 1-5", users=687, compilation=True),  # box-set title -> drop
+        _bs(2, 21, "Zwei", users=0),                              # foreign, non-comp
     ]}]}
     out = rec.select_continue_series(lib, data)
-    assert out == []  # whole series dropped: no valid entries
+    assert out == []  # whole series dropped: no valid (non-box-set) edition
+
+
+def test_continue_series_keeps_mislabeled_compilation_single_novel():
+    # Hardcover sometimes flags a normal single novel `compilation=True` (e.g. the
+    # Witcher's "The Time of Contempt"). Its clean title and dominant reader count
+    # mark it as the real installment, so it must survive — only foreign editions
+    # (0 readers) share its position, and we must not fall back to those.
+    lib = rec.parse_library({"me": [{"user_books": [
+        {"status_id": 3, "date_added": "2026-01-01", "book": {
+            "id": 1, "title": "Book One",
+            "cached_featured_series": {"series": {"id": 8, "name": "S"}, "details": "1"}}},
+    ]}]})
+    data = {"series": [{"id": 8, "name": "S", "primary_books_count": 5, "book_series": [
+        _bs(2, 90, "Vreme prezira", users=0),                  # foreign
+        _bs(2, 91, "The Time of Contempt", users=1873, compilation=True),  # mislabeled novel
+        _bs(3, 92, "Book Three"),                              # upcoming (gate)
+    ]}]}
+    out = rec.select_continue_series(lib, data)
+    by_pos = {e["position"]: e for e in out[0]["entries"]}
+    assert by_pos[2]["id"] == "91"                 # mislabeled single novel kept
+    assert by_pos[2]["title"] == "The Time of Contempt"
+    assert "90" not in [e["id"] for e in out[0]["entries"]]  # foreign not substituted
+
+
+def test_is_noise_detects_box_set_titles_but_not_single_novels():
+    assert rec._is_noise("The Complete Witcher") is True
+    assert rec._is_noise("Witcher Series 6 Books Set Collection") is True
+    assert rec._is_noise("The Witcher Series 3 Books Set Collection") is True
+    assert rec._is_noise("Stormlight, Books 1-4") is True
+    assert rec._is_noise("The Witcher Boxed Set") is True
+    assert rec._is_noise("Sanderson Omnibus") is True
+    # Real single novels / anthologies must NOT be flagged as noise.
+    assert rec._is_noise("The Time of Contempt") is False
+    assert rec._is_noise("Blood of Elves") is False
+    assert rec._is_noise("The Last Wish") is False
+    assert rec._is_noise("Sword of Destiny") is False
 
 
 def test_continue_series_includes_read_position_with_read_flag():
