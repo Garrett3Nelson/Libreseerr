@@ -380,17 +380,42 @@ function entryFullyOwned(entry, availability) {
     return slots.length > 0 && slots.every(Boolean);
 }
 
-// First entry the user should act on: released, not already read, not fully owned.
-// Falls back to the first not-read entry (e.g. only unreleased installments remain)
-// so the card still opens past the read backlog rather than on book 1.
+// Default entry: the first actionable installment AT OR AFTER the furthest
+// whole-numbered read. Fractional installments behind the reading frontier (a 0.x
+// prequel, a 1.5 novella) are left as scroll-left context instead of opening the
+// card. The frontier is the highest integer position among read entries; the backend
+// flags every whole position <= furthest-read as read, so this is reliable. With no
+// reads at all we start at position >= 1 so 0.x prequels are skipped and the card
+// opens on book 1.
 function nextGapIndex(entries, availability) {
+    let frontier = -Infinity;
+    let frontierIndex = -1;
     for (let i = 0; i < entries.length; i++) {
         const e = entries[i];
-        if (!e.read && e.released && !entryFullyOwned(e, availability)) return i;
+        if (e.read && Number.isInteger(e.position) && e.position > frontier) {
+            frontier = e.position;
+            frontierIndex = i;
+        }
     }
+    const hasReads = frontier > -Infinity;
+    const pastFrontier = (e) => hasReads ? e.position > frontier : e.position >= 1;
+
+    // Primary: first released, not-read, not-fully-owned entry past the frontier.
     for (let i = 0; i < entries.length; i++) {
-        if (!entries[i].read) return i;
+        const e = entries[i];
+        if (pastFrontier(e) && !e.read && e.released && !entryFullyOwned(e, availability)) return i;
     }
+    // Fallback A: first not-read entry past the frontier — the next real installment
+    // even when it's already owned or not yet released.
+    for (let i = 0; i < entries.length; i++) {
+        if (pastFrontier(entries[i]) && !entries[i].read) return i;
+    }
+    // Fallback B: caught up on the whole-numbered line — nothing actionable ahead, only
+    // minor releases missed behind the frontier. Open on the furthest read whole book so
+    // those missed installments are reachable by scrolling LEFT, rather than opening the
+    // card on a 0.x prequel. Only when the whole series is read do we return -1 (removes
+    // the card); an unread minor behind the frontier keeps the series worth continuing.
+    if (entries.some((e) => !e.read)) return hasReads ? frontierIndex : 0;
     return -1;
 }
 
