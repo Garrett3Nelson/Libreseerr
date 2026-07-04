@@ -510,6 +510,14 @@ body.is-admin .sidebar-role {
     cursor: not-allowed;
 }
 
+.server-btn.owned::after {
+    content: "In library";
+    display: block;
+    font-size: 0.6rem;
+    text-transform: none;
+    opacity: 0.8;
+}
+
 .slot-section { margin-top: 0.75rem; }
 .slot-heading {
     margin: 0.5rem 0 0.25rem;
@@ -892,3 +900,60 @@ body.is-admin .sidebar-role {
         max-width: 9rem;
     }
 }
+
+/* ─── Series cards (Continue the Series) ─── */
+.series-card {
+    flex: 0 0 11rem;
+    min-width: 11rem;
+    max-width: 11rem;
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: 0.5rem;
+    padding: 0.6rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+.series-card-name {
+    font-weight: 600;
+    font-size: 0.9rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.series-card-body { cursor: pointer; }
+.series-card-body.series-unreleased { cursor: default; opacity: 0.75; }
+.series-cover {
+    width: 100%;
+    aspect-ratio: 2 / 3;
+    object-fit: cover;
+    border-radius: 0.25rem;
+    display: block;
+}
+.series-entry-title {
+    font-size: 0.85rem;
+    margin-top: 0.4rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.series-entry-author { font-size: 0.75rem; color: var(--text-muted); }
+.series-card-nav {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-top: auto;  /* pin to card bottom so arrows don't shift when a badge grows the body */
+}
+.series-arrow {
+    background: none;
+    border: none;
+    color: inherit;
+    font-size: 1.4rem;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0 0.5rem;
+}
+.series-arrow:disabled { opacity: 0.3; cursor: default; }
+.series-pos { font-size: 0.75rem; color: var(--text-muted); }
+.book-badge.coming { background: rgba(107, 114, 128, 0.2); color: #9ca3af; }
+.book-badge.read { background: #16a34a; color: #fff; }

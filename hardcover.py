@@ -15,6 +15,8 @@ import logging
 
 import requests
 
+import matching
+
 logger = logging.getLogger(__name__)
 
 ENDPOINT = "https://api.hardcover.app/v1/graphql"
@@ -58,6 +60,43 @@ _ORDERED = {
 
 def get_hardcover_defaults():
     return {"enabled": False, "token": ""}
+
+
+def cover_url(value) -> str:
+    """cached_image / image can be a {url:...} object or a bare string."""
+    if isinstance(value, dict):
+        return value.get("url", "") or ""
+    if isinstance(value, str):
+        return value
+    return ""
+
+
+def normalize_book_row(book: dict) -> dict:
+    """Normalize a Hasura `books`-table row to the shared frontend book schema.
+
+    Module-level so recommendations.py (and tests) can reuse it without a client
+    instance. The `HardcoverClient` method delegates here.
+    """
+    authors = [
+        c["author"]["name"]
+        for c in (book.get("contributions") or [])
+        if c.get("author") and c["author"].get("name")
+    ]
+    return {
+        "id": str(book.get("id", "")),
+        "title": book.get("title", "Unknown"),
+        "authors": authors,
+        "publishedDate": (book.get("release_date") or "")[:4],
+        "description": "",
+        "pageCount": 0,
+        "categories": [],
+        "isbn_13": "",
+        "isbn_10": "",
+        "cover": cover_url(book.get("cached_image")),
+        "language": "en",
+        "match_title": matching.match_key(
+            book.get("title", ""), authors[0] if authors else ""),
+    }
 
 
 def _normalize_token(token: str) -> str:
@@ -152,12 +191,7 @@ query Discover {{
 
     @staticmethod
     def _cover_url(value) -> str:
-        """cached_image / image can be a {url:...} object or a bare string."""
-        if isinstance(value, dict):
-            return value.get("url", "") or ""
-        if isinstance(value, str):
-            return value
-        return ""
+        return cover_url(value)
 
     def _normalize_search_doc(self, doc: dict) -> dict:
         isbns = doc.get("isbns") or []
@@ -179,21 +213,4 @@ query Discover {{
         }
 
     def _normalize_book_row(self, book: dict) -> dict:
-        authors = [
-            c["author"]["name"]
-            for c in (book.get("contributions") or [])
-            if c.get("author") and c["author"].get("name")
-        ]
-        return {
-            "id": str(book.get("id", "")),
-            "title": book.get("title", "Unknown"),
-            "authors": authors,
-            "publishedDate": (book.get("release_date") or "")[:4],
-            "description": "",
-            "pageCount": 0,
-            "categories": [],
-            "isbn_13": "",
-            "isbn_10": "",
-            "cover": self._cover_url(book.get("cached_image")),
-            "language": "en",
-        }
+        return normalize_book_row(book)

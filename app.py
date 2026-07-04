@@ -25,6 +25,8 @@ try:
 except ImportError:
     OIDC_AVAILABLE = False
 
+import matching
+import recommendations
 from bookshelf import BookshelfClient
 from hardcover import HardcoverClient
 from lazylibrarian import LazyLibrarianClient
@@ -766,6 +768,7 @@ def get_config():
             "server_software": config["audiobook"].get("server_software", "readarr"),
             "configured": bool(config["audiobook"].get("url") and config["audiobook"].get("api_key")),
         },
+        "hardcover_enabled": bool(config.get("hardcover", {}).get("token")),
     })
 
 
@@ -840,6 +843,8 @@ def _normalize_ol_doc(doc):
         "cover": cover,
         "language": (doc.get("language", ["en"])[0]
                      if doc.get("language") else "en"),
+        "match_title": matching.match_key(
+            doc.get("title", ""), (doc.get("author_name") or [""])[0]),
     }
 
 
@@ -868,6 +873,8 @@ def _normalize_ol_subject_work(work):
         "isbn_10": "",
         "cover": cover,
         "language": "en",
+        "match_title": matching.match_key(
+            work.get("title", ""), authors[0] if authors else ""),
     }
 
 
@@ -915,6 +922,8 @@ def _discover_from_openlibrary(category):
 @login_required
 def discover_books():
     category = request.args.get("category", "").strip()
+    if category in recommendations.PERSONALIZED_CATEGORIES:
+        return _discover_personalized(category)
     if not category or category not in _DISCOVER_CATEGORIES:
         return jsonify({"error": "Invalid category"}), 400
 
@@ -935,6 +944,25 @@ def discover_books():
         return jsonify(results)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+def _discover_personalized(category):
+    """Hardcover-only personal rows (Continue the Series, More From Authors,
+    Want-to-Read). Gated on a configured token; any failure degrades to [] so
+    the discovery page always renders. The library is fetched once and all three
+    rows are cached together under the existing (source, category) cache."""
+    client = get_metadata_client()
+    if not client:
+        return jsonify([])
+    cache_key = ("hardcover", category)
+    cached = _discover_cache.get(cache_key)
+    if cached and (time.time() - cached[0]) < _DISCOVER_CACHE_TTL:
+        return jsonify(cached[1])
+    rows = recommendations.build_all(client)  # never raises
+    now = time.time()
+    for cat, items in rows.items():
+        _discover_cache[("hardcover", cat)] = (now, items)
+    return jsonify(rows.get(category, []))
 
 
 @app.route("/api/search")
@@ -960,6 +988,21 @@ def search_books():
         return jsonify({"error": str(e)}), 500
 
 
+def _library_book_author(book):
+    """Best-effort author name from a backend book (Readarr/Bookshelf/LazyLibrarian).
+    Empty-safe: returns "" when the backend doesn't expose an author."""
+    author = book.get("author")
+    if isinstance(author, dict):
+        name = author.get("authorName") or author.get("name") or ""
+        if name:
+            return name
+    for key in ("authorName", "authorname", "AuthorName", "author_name"):
+        val = book.get(key)
+        if isinstance(val, str) and val:
+            return val
+    return ""
+
+
 @app.route("/api/availability")
 @login_required
 def check_availability():
@@ -973,9 +1016,24 @@ def check_availability():
         try:
             books = client.get_books()
             isbns = set()
-            titles = set()
+            titles = set()  # normalized match keys (matching.match_key)
             for book in books:
                 title = ""
+                # Readarr/Bookshelf catalog entries carry a `statistics` dict.
+                # get_books() returns the whole catalog, including metadata stubs
+                # the user never downloaded — often auto-created during an author
+                # metadata refresh, which come back with editions=null, monitored
+                # False and bookFileCount 0. Only a book with an actual file counts
+                # as owned; otherwise it earns a false eBook/Audiobook badge
+                # (Murderbot 4.5 "Home"). This must run before the format dispatch
+                # because a fileless stub has editions=null and would otherwise slip
+                # through the flat branch below. bookFileCount can lag a refresh for
+                # a just-imported file — an acceptable trade vs. a /bookfile call
+                # per catalog entry on every hit. LazyLibrarian books have no
+                # `statistics` dict and are treated as owned, as before.
+                stats = book.get("statistics")
+                if isinstance(stats, dict) and (stats.get("bookFileCount") or 0) == 0:
+                    continue
                 # Readarr/Bookshelf format: editions array with isbn fields
                 if isinstance(book.get("editions"), list):
                     for edition in book["editions"]:
@@ -1000,7 +1058,9 @@ def check_availability():
                         isbns.add(isbn)
                     title = book.get("bookname", book.get("title", ""))
                 if title:
-                    titles.add(title.lower())
+                    author = _library_book_author(book)
+                    titles.add(matching.match_key(title, author))
+                    titles.add(matching.match_key(title))
             result[server_type] = {
                 "isbns": list(isbns),
                 "titles": list(titles),
@@ -1023,7 +1083,9 @@ def check_availability():
                 requests_by_type[server]["isbns"].add(isbn)
             title = req.get("title", "")
             if title:
-                requests_by_type[server]["titles"].add(title.lower())
+                author = req.get("author", "")
+                requests_by_type[server]["titles"].add(matching.match_key(title, author))
+                requests_by_type[server]["titles"].add(matching.match_key(title))
 
     result["ebook_requests"] = {
         "isbns": list(requests_by_type["ebook"]["isbns"]),

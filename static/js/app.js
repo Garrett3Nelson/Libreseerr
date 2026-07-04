@@ -6,6 +6,7 @@ let slotOptionsCache = {};
 let currentUser = null;
 let editingUsername = null;
 let cachedAvailability = null;
+let modalOwnership = { ebook: false, audiobook: false };
 
 // Inline SVG fallback cover. Self-contained (no network) so a missing/broken
 // cover can never trigger a failing request. The old fallback pointed at
@@ -20,6 +21,16 @@ const NO_COVER = "data:image/svg+xml," + encodeURIComponent(
     "text-anchor='middle' dominant-baseline='middle'>No Cover</text></svg>"
 );
 window.NO_COVER = NO_COVER;
+
+// Hardcover-driven personal rows, pinned above the generic ones. Only shown
+// when a Hardcover token is configured (hardcoverEnabled, from /api/config).
+// Empty rows are hidden by loadDiscovery's existing zero-length check.
+const PERSONAL_CATEGORIES = [
+    { key: "continue_series", title: "Continue the Series" },
+    { key: "more_by_authors", title: "More From Authors You've Read" },
+    { key: "want_to_read", title: "On Your Want-to-Read List" },
+];
+let hardcoverEnabled = false;
 
 const DISCOVERY_CATEGORIES = [
     { key: "new_releases", title: "New Releases" },
@@ -200,28 +211,44 @@ async function fetchAvailability() {
     return cachedAvailability;
 }
 
+// Title-only prefix of a match key ("normtitle|author" -> "normtitle|").
+// Bridges the case where one side knows the author and the other doesn't —
+// pure string op, no normalization in JS (that lives in Python matching.py).
+function titleOnlyKey(matchTitle) {
+    if (!matchTitle) return "";
+    return matchTitle.split("|")[0] + "|";
+}
+
+function slotHas(set, isbn, matchTitle) {
+    if (!set) return false;
+    if (isbn && set.isbns.includes(isbn)) return true;
+    if (matchTitle && set.titles.includes(matchTitle)) return true;
+    const prefix = titleOnlyKey(matchTitle);
+    return !!prefix && set.titles.includes(prefix);
+}
+
+// Central owned/requested check for one book against /api/availability.
+function bookOwnership(book, availability) {
+    const isbn = book.isbn_13 || book.isbn_10 || book.isbn13 || book.isbn10 || "";
+    const key = book.match_title || "";
+    return {
+        hasEbook: slotHas(availability.ebook, isbn, key),
+        hasAudiobook: slotHas(availability.audiobook, isbn, key),
+        ebookRequested: slotHas(availability.ebook_requests, isbn, key),
+        audiobookRequested: slotHas(availability.audiobook_requests, isbn, key),
+    };
+}
+
 function applyAvailabilityBadges(availability) {
     document.querySelectorAll(".book-card").forEach((card) => {
         if (card.querySelector(".book-badges")) return;
         let book;
         try { book = JSON.parse(card.dataset.book); } catch { return; }
-        const isbn = book.isbn_13 || book.isbn_10 || book.isbn13 || book.isbn10 || "";
-        const title = (book.title || "").toLowerCase();
-
-        const hasEbook = (isbn && availability.ebook.isbns.includes(isbn)) ||
-            (title && availability.ebook.titles.includes(title));
-        const hasAudiobook = (isbn && availability.audiobook.isbns.includes(isbn)) ||
-            (title && availability.audiobook.titles.includes(title));
-        const ebookRequested = availability.ebook_requests &&
-            ((isbn && availability.ebook_requests.isbns.includes(isbn)) ||
-            (title && availability.ebook_requests.titles.includes(title)));
-        const audiobookRequested = availability.audiobook_requests &&
-            ((isbn && availability.audiobook_requests.isbns.includes(isbn)) ||
-            (title && availability.audiobook_requests.titles.includes(title)));
+        const own = bookOwnership(book, availability);
 
         // "Requested" takes priority over "available" for the same server type
-        const showEbook = ebookRequested ? "requested" : (hasEbook ? "available" : null);
-        const showAudiobook = audiobookRequested ? "requested" : (hasAudiobook ? "available" : null);
+        const showEbook = own.ebookRequested ? "requested" : (own.hasEbook ? "available" : null);
+        const showAudiobook = own.audiobookRequested ? "requested" : (own.hasAudiobook ? "available" : null);
 
         if (!showEbook && !showAudiobook) return;
 
@@ -255,27 +282,33 @@ async function loadDiscovery() {
 
     container.innerHTML = '<div class="discovery-loading"><div class="spinner"></div> Loading discovery...</div>';
 
-    const promises = DISCOVERY_CATEGORIES.map(async (cat) => {
+    const categories = hardcoverEnabled
+        ? [...PERSONAL_CATEGORIES, ...DISCOVERY_CATEGORIES]
+        : DISCOVERY_CATEGORIES;
+    const promises = categories.map(async (cat) => {
         try {
             const resp = await fetch("/api/discover?category=" + encodeURIComponent(cat.key) + "&limit=20");
             const data = await resp.json();
             if (data.error || !data.length) return null;
-            return { ...cat, books: data };
+            return { ...cat, data };
         } catch {
             return null;
         }
     });
-
     const results = await Promise.all(promises);
 
-    // Dedupe across rows: a popular work shows up in several categories
-    // (Best Sellers, Fiction, Fantasy…). Keep each book in the first row it
-    // appears in and drop later repeats, so the same title isn't shown 3x.
+    // Dedupe across FLAT rows only: a popular work shows up in several categories
+    // (Best Sellers, Fiction, Fantasy…). continue_series is grouped and rendered
+    // separately, so it's exempt from the flat dedupe.
     const seen = new Set();
     const valid = [];
     for (const row of results) {
         if (!row) continue;
-        const books = row.books.filter((b) => {
+        if (row.key === "continue_series") {
+            valid.push({ ...row, grouped: true });
+            continue;
+        }
+        const books = row.data.filter((b) => {
             const key = b.id || ((b.title || "").toLowerCase() + "|" + ((b.authors || [])[0] || "").toLowerCase());
             if (seen.has(key)) return false;
             seen.add(key);
@@ -289,14 +322,184 @@ async function loadDiscovery() {
         return;
     }
 
-    container.innerHTML = valid.map(renderDiscoveryRow).join("");
+    container.innerHTML = valid.map((row) =>
+        row.grouped ? renderSeriesRow(row) : renderDiscoveryRow(row)).join("");
 
+    // Flat book cards open the download modal on click.
     container.querySelectorAll(".book-card").forEach((card) => {
-        card.addEventListener("click", () => {
-            openDownloadModal(JSON.parse(card.dataset.book));
-        });
+        card.addEventListener("click", () => openDownloadModal(JSON.parse(card.dataset.book)));
     });
-    fetchAvailability().then(applyAvailabilityBadges);
+
+    // Availability drives flat badges, series default-entry selection, and the
+    // hide-fully-owned pass — all after /api/availability resolves.
+    fetchAvailability().then((availability) => {
+        applyAvailabilityBadges(availability);
+        initSeriesCards(availability);
+        hideFullyOwnedFlatCards(availability);
+    });
+}
+
+function renderSeriesRow(row) {
+    const cards = row.data.map(renderSeriesCard).join("");
+    return `
+        <div class="discovery-row">
+            <div class="discovery-row-header">
+                <div class="discovery-row-title">${row.title}</div>
+            </div>
+            <div class="discovery-row-scroll">${cards}</div>
+        </div>`;
+}
+
+// One card per series. All entries are stored as JSON on the element; navigation
+// swaps the visible entry. Data-only here — the default index and owned badges
+// are set later by initSeriesCards once availability resolves.
+function renderSeriesCard(group) {
+    const entriesJson = JSON.stringify(group.entries).replace(/"/g, "&quot;");
+    const nameJson = (group.series_name || "").replace(/"/g, "&quot;");
+    const total = group.series_total || group.entries.length;
+    return `
+        <div class="series-card" data-entries="${entriesJson}" data-index="0"
+             data-total="${total}" data-series="${nameJson}">
+            <div class="series-card-name">${group.series_name || ""}</div>
+            <div class="series-card-body"></div>
+            <div class="series-card-nav">
+                <button class="series-arrow series-prev" aria-label="Previous">‹</button>
+                <span class="series-pos"></span>
+                <button class="series-arrow series-next" aria-label="Next">›</button>
+            </div>
+        </div>`;
+}
+
+let seriesAvailability = null;
+
+function entryFullyOwned(entry, availability) {
+    const own = bookOwnership(entry, availability);
+    const slots = [];
+    if (serverConfigured.ebook) slots.push(own.hasEbook || own.ebookRequested);
+    if (serverConfigured.audiobook) slots.push(own.hasAudiobook || own.audiobookRequested);
+    return slots.length > 0 && slots.every(Boolean);
+}
+
+// Default entry: the first actionable installment AT OR AFTER the furthest
+// whole-numbered read. Fractional installments behind the reading frontier (a 0.x
+// prequel, a 1.5 novella) are left as scroll-left context instead of opening the
+// card. The frontier is the highest integer position among read entries; the backend
+// flags every whole position <= furthest-read as read, so this is reliable. With no
+// reads at all we start at position >= 1 so 0.x prequels are skipped and the card
+// opens on book 1.
+function nextGapIndex(entries, availability) {
+    let frontier = -Infinity;
+    let frontierIndex = -1;
+    for (let i = 0; i < entries.length; i++) {
+        const e = entries[i];
+        if (e.read && Number.isInteger(e.position) && e.position > frontier) {
+            frontier = e.position;
+            frontierIndex = i;
+        }
+    }
+    const hasReads = frontier > -Infinity;
+    const pastFrontier = (e) => hasReads ? e.position > frontier : e.position >= 1;
+
+    // Primary: first released, not-read, not-fully-owned entry past the frontier.
+    for (let i = 0; i < entries.length; i++) {
+        const e = entries[i];
+        if (pastFrontier(e) && !e.read && e.released && !entryFullyOwned(e, availability)) return i;
+    }
+    // Fallback A: first not-read entry past the frontier — the next real installment
+    // even when it's already owned or not yet released.
+    for (let i = 0; i < entries.length; i++) {
+        if (pastFrontier(entries[i]) && !entries[i].read) return i;
+    }
+    // Fallback B: caught up on the whole-numbered line — nothing actionable ahead, only
+    // minor releases missed behind the frontier. Open on the furthest read whole book so
+    // those missed installments are reachable by scrolling LEFT, rather than opening the
+    // card on a 0.x prequel. Only when the whole series is read do we return -1 (removes
+    // the card); an unread minor behind the frontier keeps the series worth continuing.
+    if (entries.some((e) => !e.read)) return hasReads ? frontierIndex : 0;
+    return -1;
+}
+
+function initSeriesCards(availability) {
+    seriesAvailability = availability;
+    document.querySelectorAll(".series-card").forEach((card) => {
+        let entries;
+        try { entries = JSON.parse(card.dataset.entries); } catch { entries = []; }
+        const gap = nextGapIndex(entries, availability);
+        // -1 only when every entry is read (backend gate makes this rare/defensive).
+        if (gap === -1) { card.remove(); return; }
+        card.dataset.index = String(gap);
+        renderSeriesEntry(card, entries);
+        card.querySelector(".series-prev").addEventListener("click", () => stepSeries(card, -1));
+        card.querySelector(".series-next").addEventListener("click", () => stepSeries(card, 1));
+    });
+    // Hide any discovery row whose series cards were all removed.
+    document.querySelectorAll(".discovery-row").forEach((rowEl) => {
+        const scroll = rowEl.querySelector(".discovery-row-scroll");
+        if (scroll && scroll.children.length === 0) rowEl.remove();
+    });
+}
+
+function stepSeries(card, delta) {
+    let entries;
+    try { entries = JSON.parse(card.dataset.entries); } catch { return; }
+    let idx = parseInt(card.dataset.index, 10) + delta;
+    idx = Math.max(0, Math.min(entries.length - 1, idx));  // clamp at ends
+    card.dataset.index = String(idx);
+    renderSeriesEntry(card, entries);
+}
+
+function renderSeriesEntry(card, entries) {
+    const idx = parseInt(card.dataset.index, 10);
+    const entry = entries[idx];
+    const body = card.querySelector(".series-card-body");
+    const cover = entry.cover || NO_COVER;
+    const author = Array.isArray(entry.authors) ? entry.authors.join(", ") : "";
+    const year = (entry.publishedDate || "").substring(0, 4);
+
+    let badges = "";
+    if (entry.read) badges += '<span class="book-badge read">Read ✓</span>';
+    if (!entry.released) {
+        badges += `<span class="book-badge coming">Coming${year ? " " + year : ""}</span>`;
+    } else if (seriesAvailability) {
+        const own = bookOwnership(entry, seriesAvailability);
+        if (own.ebookRequested) badges += '<span class="book-badge ebook-requested">eBook Requested</span>';
+        else if (own.hasEbook) badges += '<span class="book-badge ebook">eBook ✓</span>';
+        if (own.audiobookRequested) badges += '<span class="book-badge audiobook-requested">Audiobook Requested</span>';
+        else if (own.hasAudiobook) badges += '<span class="book-badge audiobook">Audiobook ✓</span>';
+    }
+
+    body.innerHTML = `
+        <img class="series-cover" src="${cover}" alt="${entry.title || ""}" loading="lazy"
+             onerror="this.onerror=null;this.src=window.NO_COVER">
+        <div class="series-entry-title" title="${entry.title || ""}">${entry.title || ""}</div>
+        <div class="series-entry-author">${author}${year ? " (" + year + ")" : ""}</div>
+        <div class="book-badges">${badges}</div>`;
+
+    // Clicking a released entry opens the request modal; unreleased is inert.
+    body.onclick = entry.released ? () => openDownloadModal(entry) : null;
+    body.classList.toggle("series-unreleased", !entry.released);
+
+    const total = card.dataset.total || entries.length;
+    card.querySelector(".series-pos").textContent = `${entry.position} / ${total}`;
+    card.querySelector(".series-prev").disabled = idx === 0;
+    card.querySelector(".series-next").disabled = idx === entries.length - 1;
+}
+
+function hideFullyOwnedFlatCards(availability) {
+    document.querySelectorAll(".book-card").forEach((card) => {
+        let book;
+        try { book = JSON.parse(card.dataset.book); } catch { return; }
+        const own = bookOwnership(book, availability);
+        const slots = [];
+        if (serverConfigured.ebook) slots.push(own.hasEbook || own.ebookRequested);
+        if (serverConfigured.audiobook) slots.push(own.hasAudiobook || own.audiobookRequested);
+        if (slots.length > 0 && slots.every(Boolean)) card.remove();
+    });
+    // Hide any discovery row left with no cards after removals.
+    document.querySelectorAll(".discovery-row").forEach((rowEl) => {
+        const scroll = rowEl.querySelector(".discovery-row-scroll");
+        if (scroll && scroll.children.length === 0) rowEl.remove();
+    });
 }
 
 // ─── Download Modal ───
@@ -304,8 +507,25 @@ async function loadDiscovery() {
 async function openDownloadModal(book) {
     currentModalBook = book;
     selectedServers = new Set();
-    if (serverConfigured.ebook) selectedServers.add("ebook");
-    else if (serverConfigured.audiobook) selectedServers.add("audiobook");
+
+    // Determine owned state so we can default to the MISSING format.
+    const availability = await fetchAvailability();
+    const own = bookOwnership(book, availability);
+    modalOwnership = {
+        ebook: serverConfigured.ebook && (own.hasEbook || own.ebookRequested),
+        audiobook: serverConfigured.audiobook && (own.hasAudiobook || own.audiobookRequested),
+    };
+
+    // Pre-select each configured-but-not-owned slot; fall back to the first
+    // configured slot if somehow all are owned (shouldn't happen — such books
+    // are hidden — but keeps the modal usable if opened directly).
+    for (const slot of ["ebook", "audiobook"]) {
+        if (serverConfigured[slot] && !modalOwnership[slot]) selectedServers.add(slot);
+    }
+    if (!selectedServers.size) {
+        if (serverConfigured.ebook) selectedServers.add("ebook");
+        else if (serverConfigured.audiobook) selectedServers.add("audiobook");
+    }
 
     document.getElementById("modal-title").textContent = "Download: " + (book.title || "Unknown");
     renderServerButtons();
@@ -323,13 +543,19 @@ function renderServerButtons() {
         const slot = btn.dataset.server;
         const label = slot === "ebook" ? "Ebook" : "Audiobook";
         const configured = serverConfigured[slot];
-        btn.disabled = !configured;
-        btn.classList.toggle("disabled", !configured);
-        btn.title = configured
-            ? ""
-            : `${label} server isn't configured. Configure it in Settings to request this format.`;
+        const owned = modalOwnership[slot];
+        btn.disabled = !configured || owned;
+        btn.classList.toggle("disabled", !configured || owned);
+        btn.classList.toggle("owned", !!owned);
+        if (!configured) {
+            btn.title = `${label} server isn't configured. Configure it in Settings to request this format.`;
+        } else if (owned) {
+            btn.title = `${label} is already in your library.`;
+        } else {
+            btn.title = "";
+        }
         btn.classList.toggle("active", selectedServers.has(slot));
-        btn.onclick = configured ? () => { toggleServer(slot).catch(console.error); } : null;
+        btn.onclick = (configured && !owned) ? () => { toggleServer(slot).catch(console.error); } : null;
     });
 }
 
@@ -530,6 +756,7 @@ async function loadConfig() {
         const resp = await fetch("/api/config");
         const data = await resp.json();
         serverConfigured = { ebook: !!data.ebook.configured, audiobook: !!data.audiobook.configured };
+        hardcoverEnabled = !!data.hardcover_enabled;
         slotOptionsCache = {};
         document.getElementById("ebook-url").value = data.ebook.url || "";
         document.getElementById("ebook-api").value = data.ebook.api_key || "";
@@ -989,7 +1216,7 @@ window.testHardcover = async function () {
 // ─── Init ───
 
 // Load current user first, then the rest
-loadCurrentUser().then(() => {
-    loadConfig();
+loadCurrentUser().then(async () => {
+    await loadConfig();  // sets hardcoverEnabled before discovery builds its rows
     loadDiscovery();
 });
