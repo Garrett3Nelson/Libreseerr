@@ -200,6 +200,8 @@ def select_continue_series(library: Library, data: dict) -> list:
             pos = _parse_int_position(bs.get("position"))
             if pos is None:
                 continue
+            if pos < 1:
+                continue  # position 0 = prequel/omnibus/anthology, not the primary run
             if primary_count and pos > primary_count:
                 continue
             editions_by_pos.setdefault(pos, []).append(bs.get("book") or {})

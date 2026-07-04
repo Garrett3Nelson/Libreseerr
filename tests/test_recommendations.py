@@ -123,6 +123,30 @@ def test_continue_series_filters_noise_fractional_and_beyond_primary():
     assert all("Books 1-4" not in t for t in titles)  # compilation dropped
 
 
+def test_continue_series_excludes_position_zero():
+    # Hardcover puts prequels/omnibus/anthology editions at position 0. The primary
+    # run is 1..primary_books_count, so position 0 must never appear — even as read
+    # context (it's auto-flagged read because 0 <= furthest, and read positions skip
+    # the compilation/noise filters, so a foreign omnibus would otherwise anchor the
+    # card). Regression: Dune/Witcher cards opened on a French "book 0".
+    lib = rec.parse_library({"me": [{"user_books": [
+        {"status_id": 3, "date_added": "2026-01-01", "book": {
+            "id": 1, "title": "Book One",
+            "cached_featured_series": {"series": {"id": 7, "name": "S"}, "details": "1"}}},
+    ]}]})
+    data = {"series": [{"id": 7, "name": "S", "primary_books_count": 5, "book_series": [
+        _bs(0, 900, "L'Intégrale (French Omnibus)", users=999, compilation=True),
+        _bs(1, 1, "Book One"),        # read
+        _bs(2, 20, "Book Two"),       # upcoming
+        _bs(3, 30, "Book Three"),     # upcoming
+    ]}]}
+    out = rec.select_continue_series(lib, data)
+    positions = [e["position"] for e in out[0]["entries"]]
+    assert 0 not in positions                                  # position 0 excluded
+    assert positions == [1, 2, 3]
+    assert all("Intégrale" not in e["title"] for e in out[0]["entries"])
+
+
 def test_continue_series_unreleased_flagged_not_dropped():
     lib = rec.parse_library({"me": [{"user_books": [
         {"status_id": 3, "date_added": "2026-01-01", "book": {
