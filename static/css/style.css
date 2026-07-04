@@ -942,6 +942,7 @@ body.is-admin .sidebar-role {
     display: flex;
     align-items: center;
     justify-content: space-between;
+    margin-top: auto;  /* pin to card bottom so arrows don't shift when a badge grows the body */
 }
 .series-arrow {
     background: none;
