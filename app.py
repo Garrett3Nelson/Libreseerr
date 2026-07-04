@@ -1019,6 +1019,21 @@ def check_availability():
             titles = set()  # normalized match keys (matching.match_key)
             for book in books:
                 title = ""
+                # Readarr/Bookshelf catalog entries carry a `statistics` dict.
+                # get_books() returns the whole catalog, including metadata stubs
+                # the user never downloaded — often auto-created during an author
+                # metadata refresh, which come back with editions=null, monitored
+                # False and bookFileCount 0. Only a book with an actual file counts
+                # as owned; otherwise it earns a false eBook/Audiobook badge
+                # (Murderbot 4.5 "Home"). This must run before the format dispatch
+                # because a fileless stub has editions=null and would otherwise slip
+                # through the flat branch below. bookFileCount can lag a refresh for
+                # a just-imported file — an acceptable trade vs. a /bookfile call
+                # per catalog entry on every hit. LazyLibrarian books have no
+                # `statistics` dict and are treated as owned, as before.
+                stats = book.get("statistics")
+                if isinstance(stats, dict) and (stats.get("bookFileCount") or 0) == 0:
+                    continue
                 # Readarr/Bookshelf format: editions array with isbn fields
                 if isinstance(book.get("editions"), list):
                     for edition in book["editions"]:

@@ -75,6 +75,18 @@ def _parse_int_position(value):
     return int(f)
 
 
+def _parse_position(value):
+    """Series position as a number, or None if missing/unparseable. Whole numbers
+    return an ``int`` (so labels read "3 / 5", not "3.0 / 5"); genuine fractional
+    installments — prequels below book 1 (Witcher's 0.5/0.6/0.7) or novellas
+    between books (Stormlight's Edgedancer 3.1) — keep their ``float`` position."""
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    return int(f) if f == int(f) else f
+
+
 def parse_library(data: dict) -> Library:
     """Partition the raw ``me { user_books }`` response into a Library."""
     lib = Library()
@@ -96,6 +108,14 @@ def parse_library(data: dict) -> Library:
             info = _series_info(book.get("cached_featured_series"))
             if info:
                 sid, sname, details = info
+                # A non-numeric position means this book isn't a real installment
+                # of the series — it's an anthology guest story Hardcover cross-
+                # links at a label like "- Gamer's End" ("Press Start to Play" ->
+                # The Machineries of Empire). Reading it is not reading the series,
+                # so don't seed progress (which would recommend an unread series).
+                # A genuine fractional read (a 0.5 prequel) still parses and seeds.
+                if _parse_position(details) is None:
+                    continue
                 entry = lib.series_progress.setdefault(
                     sid, {"furthest": 0, "last_date": "", "name": sname})
                 pos = _parse_int_position(details)
@@ -179,10 +199,13 @@ def select_continue_series(library: Library, data: dict) -> list:
          "entries": [ { **normalized_book, "position": int,
                         "released": bool, "read": bool }, ... ]}
 
-    Entries are every primary installment (positions ``1..primary_books_count``)
-    with a valid canonical edition, ascending. Read positions (at/below the
-    furthest-read book, or any position whose edition the user has read) are
-    INCLUDED and flagged ``read: True``, preferring the actually-read edition —
+    Entries are every installment in the primary run — whole-numbered books plus
+    Hardcover-``featured`` fractional prequels/novellas (0.5, 2.5, …), ascending;
+    non-featured rows (translations, split "Part" volumes, box sets) are dropped
+    unless they're the edition the user read. Read positions — a *whole-numbered*
+    position at/below the furthest-read book, or any position whose edition the
+    user has read (a fractional novella counts as read only if actually logged) —
+    are INCLUDED and flagged ``read: True``, preferring the actually-read edition;
     these are the left-hand context the arrows scroll back through. Upcoming
     (not-read) positions keep the content filters (canonical edition, drop
     compilation/noise/already-read) and are flagged ``read: False``; unreleased
@@ -203,28 +226,47 @@ def select_continue_series(library: Library, data: dict) -> list:
         # Positions where the user read *any* edition — treated as read even if the
         # specific edition below isn't the one they logged.
         read_positions = {
-            _parse_int_position(bs.get("position"))
+            _parse_position(bs.get("position"))
             for bs in s.get("book_series") or []
             if (bs.get("book") or {}).get("id") in library.excluded_ids
         }
         read_positions.discard(None)
-        # Group all editions by integer position across the whole primary run.
+        # Group all editions by position across the whole primary run. Fractional
+        # installments (0.x prequels, mid-series novellas) keep their float position.
         editions_by_pos = {}
         for bs in s.get("book_series") or []:
-            pos = _parse_int_position(bs.get("position"))
+            pos = _parse_position(bs.get("position"))
             if pos is None:
                 continue
-            if pos < 1:
-                continue  # position 0 = prequel/omnibus/anthology, not the primary run
+            if pos <= 0:
+                continue  # position 0 = Hardcover's omnibus/anthology/foreign anchor
             if primary_count and pos > primary_count:
                 continue
-            editions_by_pos.setdefault(pos, []).append(bs.get("book") or {})
+            book = bs.get("book") or {}
+            # Two kinds of book_series rows are returned by the API but hidden from
+            # Hardcover's own series page because they aren't real installments:
+            #   • split "Part N" volumes  -> book.is_partial_book is True
+            #   • alternate/translated editions merged into a canonical book
+            #                             -> book.canonical_id is set
+            # Drop both (verified against the live Stormlight/OMW/Little Women
+            # pages), unless it's the edition the user actually read — then keep it
+            # as their read-context cover. This replaces the `featured` flag, which
+            # was both over-inclusive (kept "Oathbringer Part 1") and under-
+            # inclusive (dropped the real "The Sagan Diary" novella).
+            if book.get("id") not in library.excluded_ids and (
+                    book.get("is_partial_book") or book.get("canonical_id") is not None):
+                continue
+            editions_by_pos.setdefault(pos, []).append(book)
         # Pick a canonical edition per position; (book, is_read) survives filtering.
         # Read positions are left-hand scroll context, so they intentionally skip
         # the compilation/noise filters below — the read edition is what to show.
         canonical_by_pos = {}
         for pos, editions in editions_by_pos.items():
-            is_read = pos <= furthest or pos in read_positions
+            # "Everything below the furthest-read book is read" only holds for
+            # whole-numbered installments; a fractional novella below furthest is
+            # read only if the user actually logged that edition.
+            whole = pos == int(pos)
+            is_read = pos in read_positions or (whole and pos <= furthest)
             if is_read:
                 # Prefer the edition the user actually read; else best-ranked.
                 read_ed = next(
@@ -321,8 +363,10 @@ query SeriesExpand($ids: [Int!]) {
     id name books_count primary_books_count
     book_series(order_by: {position: asc}, limit: 100) {
       position
+      featured
       book {
         id title release_date cached_image compilation users_count
+        is_partial_book canonical_id
         contributions(limit: 2) { author { name } }
       }
     }

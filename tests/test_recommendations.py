@@ -67,17 +67,53 @@ def test_parse_library_series_progress_furthest():
     assert prog["last_date"] == "2026-06-05"
 
 
+def test_parse_library_ignores_nonnumeric_series_position():
+    # An anthology (e.g. "Press Start to Play") can carry one guest story that
+    # Hardcover cross-links to another author's series at a non-numeric position
+    # ("- Gamer's End"). Reading that anthology is NOT reading the series, so it
+    # must not seed series_progress — otherwise the series gets recommended though
+    # nothing in it was read. Regression: "The Machineries of Empire".
+    lib = rec.parse_library({"me": [{"user_books": [
+        {"status_id": 3, "date_added": "2020-01-01", "book": {
+            "id": 1, "title": "Press Start to Play",
+            "cached_featured_series": {"series": {"id": 983, "name": "Machineries"},
+                                       "details": "- Gamer's End"}}},
+    ]}]})
+    assert 983 not in lib.series_progress
+
+
+def test_parse_library_seeds_on_fractional_prequel_read():
+    # Reading a genuine fractional installment (The Witcher's "The Last Wish" at
+    # position 0.5) IS engaging with the series — it must still seed progress even
+    # though furthest stays 0. This is the legit case the non-numeric gate must not
+    # break.
+    lib = rec.parse_library({"me": [{"user_books": [
+        {"status_id": 3, "date_added": "2020-08-31", "book": {
+            "id": 1, "title": "The Last Wish",
+            "cached_featured_series": {"series": {"id": 1808, "name": "The Witcher"},
+                                       "details": "0.5"}}},
+    ]}]})
+    assert 1808 in lib.series_progress
+    assert lib.series_progress[1808]["furthest"] == 0
+    assert lib.series_progress[1808]["last_date"] == "2020-08-31"
+
+
 def test_parse_library_handles_me_as_object_and_empty():
     assert rec.parse_library({"me": {"user_books": []}}).read_ids == set()
     assert rec.parse_library({"me": []}).want == []
     assert rec.parse_library({}).author_ids == []
 
 
-def _bs(pos, bid, title, users=100, cover="c", compilation=False):
-    book = {"id": bid, "title": title, "users_count": users, "compilation": compilation}
+def _bs(pos, bid, title, users=100, cover="c", compilation=False, featured=None,
+        is_partial=False, canonical_id=None):
+    book = {"id": bid, "title": title, "users_count": users, "compilation": compilation,
+            "is_partial_book": is_partial, "canonical_id": canonical_id}
     if cover:
         book["cached_image"] = {"url": cover}
-    return {"position": pos, "book": book}
+    row = {"position": pos, "book": book}
+    if featured is not None:
+        row["featured"] = featured
+    return row
 
 
 _EXPANSION = {"series": [{
@@ -87,7 +123,7 @@ _EXPANSION = {"series": [{
         _bs(2, 101, "Words of Radiance"),         # already read (furthest)
         _bs(2, 999, "Words of Radiance (German Edition)", users=5),  # dup pos, foreign
         _bs(3, 102, "Oathbringer"),               # NEXT
-        _bs(3.1, 900, "Edgedancer"),              # fractional -> drop
+        _bs(3.1, 900, "Edgedancer"),              # fractional novella -> KEPT (upcoming)
         _bs(4, 103, "Rhythm of War"),             # NEXT
         _bs(5, 104, "Wind and Truth"),            # NEXT
         _bs(6, 105, "Beyond Primary"),            # > primary_books_count -> drop
@@ -108,17 +144,19 @@ def test_continue_series_grouped_shape_and_positions():
     assert group["series_id"] == 1
     assert group["series_name"] == "Stormlight"
     assert group["series_total"] == 5  # primary_books_count
-    # Whole primary run 1..5: read 1-2 (canonical read edition), upcoming 3-5.
+    # Whole primary run 1..5 plus the 3.1 novella: read 1-2 (canonical read
+    # edition), upcoming 3, 3.1, 4, 5. Fractional novellas are kept, ordered.
     assert _entries(group) == [
         ("100", 1, True, True), ("101", 2, True, True),
-        ("102", 3, True, False), ("103", 4, True, False), ("104", 5, True, False)]
+        ("102", 3, True, False), ("900", 3.1, True, False),
+        ("103", 4, True, False), ("104", 5, True, False)]
 
 
-def test_continue_series_filters_noise_fractional_and_beyond_primary():
+def test_continue_series_filters_noise_and_beyond_primary_keeps_novella():
     lib = rec.parse_library(_LIB)
     out = rec.select_continue_series(lib, _EXPANSION)
     titles = [e["title"] for e in out[0]["entries"]]
-    assert "Edgedancer" not in titles                 # fractional dropped
+    assert "Edgedancer" in titles                     # fractional novella KEPT
     assert "Beyond Primary" not in titles             # beyond primary run
     assert all("Books 1-4" not in t for t in titles)  # compilation dropped
 
@@ -145,6 +183,99 @@ def test_continue_series_excludes_position_zero():
     assert 0 not in positions                                  # position 0 excluded
     assert positions == [1, 2, 3]
     assert all("Intégrale" not in e["title"] for e in out[0]["entries"])
+
+
+def test_continue_series_includes_fractional_prequel_band():
+    # The Witcher orders its foundational books below position 1: The Last Wish
+    # (0.5), Season of Storms (0.6), Sword of Destiny (0.7), then Blood of Elves
+    # (1). These fractional installments must appear, ascending, before book 1 —
+    # while position 0 (Hardcover's omnibus/foreign anchor) stays excluded.
+    lib = rec.parse_library({"me": [{"user_books": [
+        {"status_id": 3, "date_added": "2026-01-01", "book": {
+            "id": 1, "title": "Blood of Elves",
+            "cached_featured_series": {"series": {"id": 7, "name": "S"}, "details": "1"}}},
+    ]}]})
+    data = {"series": [{"id": 7, "name": "S", "primary_books_count": 5, "book_series": [
+        _bs(0, 900, "Sorceleur - L'Intégrale (French Omnibus)", users=999, compilation=True),
+        _bs(0.5, 5, "The Last Wish"),
+        _bs(0.6, 6, "Season of Storms"),
+        _bs(0.7, 7, "Sword of Destiny"),
+        _bs(1, 1, "Blood of Elves"),   # read
+        _bs(2, 20, "Time of Contempt"),  # upcoming
+    ]}]}
+    out = rec.select_continue_series(lib, data)
+    positions = [e["position"] for e in out[0]["entries"]]
+    assert positions == [0.5, 0.6, 0.7, 1, 2]  # fractionals kept, ascending
+    assert 0 not in positions                  # omnibus anchor still excluded
+    assert all("Intégrale" not in e["title"] for e in out[0]["entries"])
+
+
+def test_continue_series_fractional_novella_not_read_below_furthest():
+    # A novella at 2.5 sits below the furthest read book (3), but the user never
+    # logged it. The "everything below furthest is read" shortcut is only valid for
+    # whole-numbered installments, so the novella must be upcoming (read=False).
+    lib = rec.parse_library({"me": [{"user_books": [
+        {"status_id": 3, "date_added": "2026-01-01", "book": {
+            "id": 3, "title": "Book Three",
+            "cached_featured_series": {"series": {"id": 7, "name": "S"}, "details": "3"}}},
+    ]}]})
+    data = {"series": [{"id": 7, "name": "S", "primary_books_count": 5, "book_series": [
+        _bs(2.5, 25, "Novella Two-Five"),
+        _bs(3, 3, "Book Three"),      # read (furthest)
+        _bs(4, 40, "Book Four"),      # upcoming
+    ]}]}
+    out = rec.select_continue_series(lib, data)
+    by_pos = {e["position"]: e for e in out[0]["entries"]}
+    assert by_pos[2.5]["read"] is False   # below furthest but never logged
+    assert by_pos[3]["read"] is True
+    assert by_pos[4]["read"] is False
+
+
+def test_continue_series_drops_split_and_canonical_editions_except_read():
+    # Hardcover's series page hides two kinds of book_series rows that its API
+    # still returns: split "Part N" volumes (book.is_partial_book), and alternate/
+    # translated editions merged into a canonical book (book.canonical_id set).
+    # Both are dropped — but a merged/split edition the user actually READ is kept
+    # as their read-context cover. `featured` is deliberately NOT consulted (it was
+    # both over- and under-inclusive: it kept "Oathbringer Part 1" and dropped the
+    # real "The Sagan Diary" novella).
+    lib = rec.parse_library({"me": [{"user_books": [
+        {"status_id": 3, "date_added": "2026-01-01", "book": {
+            "id": 1, "title": "Book One",
+            "cached_featured_series": {"series": {"id": 7, "name": "S"}, "details": "1"}}},
+    ]}]})
+    data = {"series": [{"id": 7, "name": "S", "primary_books_count": 5, "book_series": [
+        _bs(1, 1, "Book One (Polish)", canonical_id=999),    # read edition -> KEPT
+        _bs(1.2, 12, "Dobre żony", canonical_id=888),        # foreign fractional -> DROP
+        _bs(3.1, 31, "Book Three, Part 1", is_partial=True),  # split volume -> DROP
+        _bs(2.5, 25, "Real Novella", featured=False),        # featured=False original -> KEEP
+        _bs(2, 20, "Book Two"),                              # upcoming primary -> KEEP
+    ]}]}
+    out = rec.select_continue_series(lib, data)
+    positions = sorted(e["position"] for e in out[0]["entries"])
+    assert positions == [1, 2, 2.5]      # 1.2 and 3.1 dropped; read pos 1 kept
+    titles = [e["title"] for e in out[0]["entries"]]
+    assert "Dobre żony" not in titles
+    assert all("Part 1" not in t for t in titles)
+
+
+def test_continue_series_keeps_featured_false_original_novella():
+    # Regression for the "featured filter" bug: "The Sagan Diary" (Old Man's War
+    # 2.5) is a real novella Hardcover marks featured=False. It has no
+    # is_partial_book / canonical_id, so it must appear (it was wrongly dropped
+    # before). Mirrors the live Old Man's War series page.
+    lib = rec.parse_library({"me": [{"user_books": [
+        {"status_id": 3, "date_added": "2026-01-01", "book": {
+            "id": 1, "title": "The Ghost Brigades",
+            "cached_featured_series": {"series": {"id": 7, "name": "S"}, "details": "2"}}},
+    ]}]})
+    data = {"series": [{"id": 7, "name": "S", "primary_books_count": 7, "book_series": [
+        _bs(2.5, 25, "The Sagan Diary", users=275, featured=False),  # real novella -> KEEP
+        _bs(3, 30, "The Last Colony", featured=True),               # upcoming primary
+    ]}]}
+    out = rec.select_continue_series(lib, data)
+    titles = [e["title"] for e in out[0]["entries"]]
+    assert "The Sagan Diary" in titles
 
 
 def test_continue_series_unreleased_flagged_not_dropped():
@@ -391,8 +522,10 @@ def test_build_all_returns_three_rows():
     assert set(out) == set(rec.PERSONALIZED_CATEGORIES)
     groups = out["continue_series"]
     assert [g["series_id"] for g in groups] == [1]
-    # Whole primary run now included: read 100,101 then upcoming 102,103,104.
-    assert [e["id"] for e in groups[0]["entries"]] == ["100", "101", "102", "103", "104"]
+    # Whole primary run now included: read 100,101 then upcoming 102, the 3.1
+    # novella 900, then 103,104.
+    assert [e["id"] for e in groups[0]["entries"]] == [
+        "100", "101", "102", "900", "103", "104"]
     assert groups[0]["series_total"] == 5
     assert [b["id"] for b in out["want_to_read"]] == ["301", "300"]
 

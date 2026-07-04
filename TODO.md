@@ -78,3 +78,29 @@ runs on the normalized-title fallback rather than ISBN or title+author. This is
 the graceful-degradation path the spec anticipated (Feature 1 "ISBN risk"). If a
 backend that exposes ISBNs/authors is added later, matching precision improves
 automatically with no code change.
+
+## Availability counts only downloaded books (fixed); bookFileCount can lag
+
+**Fixed.** `/api/availability` (`check_availability`) used to add every book from
+`get_books()` to the owned set. Bookshelf/Readarr `GET /api/v1/book` returns the
+whole **catalog**, including metadata stubs the user never downloaded — often
+auto-created during an author metadata refresh, with `editions: null`,
+`monitored: false` and `statistics.bookFileCount: 0`. Those earned false
+eBook/Audiobook badges (reported case: Murderbot 4.5 `Home: Habitat, Range,
+Niche, Territory`, which was in the audiobook catalog as a fileless stub). Now a
+book is skipped unless `statistics.bookFileCount > 0`. The gate runs before the
+editions/flat format dispatch because a stub has `editions: null` and would
+otherwise slip through the flat branch. LazyLibrarian books (no `statistics`
+dict) are unaffected.
+
+**Known caveat (Bookshelf-side, not ours):** `statistics.bookFileCount` is a
+cached value Bookshelf doesn't recompute until an author refresh runs, so a book
+with an imported file can still report `bookFileCount: 0` (observed live for
+`Fugitive Telemetry` — `/api/v1/bookfile` returned 1 file while `bookFileCount`
+was 0, and Bookshelf's own UI showed "Files (0)"). We intentionally mirror
+Bookshelf's reported count rather than making a per-book `/bookfile` call on every
+availability hit (that would be one HTTP call per catalog entry). Unfiltered
+`GET /bookfile` is not an option — it 500s demanding an authorId/bookId. Once the
+underlying Bookshelf count bug is fixed, such books report correctly with no
+change here. If it needs addressing sooner: batch `/bookfile` by authorId (one
+call per owned author) and treat presence there as owned.

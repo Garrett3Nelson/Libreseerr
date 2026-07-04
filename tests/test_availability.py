@@ -25,6 +25,7 @@ def test_availability_returns_match_keys_and_isbns(auth_client, monkeypatch):
         "title": "The Way of Kings",
         "author": {"authorName": "Brandon Sanderson"},
         "editions": [{"isbn13": "9780765326355"}],
+        "statistics": {"bookFileCount": 1},  # actually downloaded
     }]
 
     def fake_get_client(server_type):
@@ -54,6 +55,36 @@ def test_availability_request_titles_are_match_keys(auth_client, monkeypatch):
     keys = data["audiobook_requests"]["titles"]
     assert matching.match_key("Words of Radiance", "Brandon Sanderson") in keys
     assert matching.match_key("Words of Radiance") in keys
+
+
+def test_availability_excludes_catalog_books_without_a_file(auth_client, monkeypatch):
+    # Readarr/Bookshelf get_books() returns the whole catalog, including metadata
+    # stubs a user never downloaded (often auto-created during an author refresh):
+    # monitored may be False and statistics.bookFileCount == 0. Those are NOT owned
+    # and must not appear in availability — otherwise a book shows a false
+    # "eBook ✓" / "Audiobook ✓" badge. Regression: Murderbot 4.5 "Home".
+    ebook_books = [
+        {"title": "Owned Book", "author": {"authorName": "A"},
+         "editions": [{"isbn13": "1111111111111"}], "statistics": {"bookFileCount": 2}},
+        {"title": "Catalog Stub", "author": {"authorName": "B"},
+         "editions": [{"isbn13": "2222222222222"}],
+         "monitored": False, "statistics": {"bookFileCount": 0}},
+        # Real live shape of an auto-created stub: editions is null (would fall
+        # through to the flat branch), so the file gate must run before dispatch.
+        {"title": "Null Editions Stub", "author": {"authorName": "C"},
+         "editions": None, "monitored": False, "statistics": {"bookFileCount": 0}},
+    ]
+    monkeypatch.setattr(app_module, "get_client",
+                        lambda s: _FakeClient(ebook_books) if s == "ebook" else None)
+    monkeypatch.setattr(app_module, "requests_history", [])
+    data = auth_client.get("/api/availability").get_json()
+    titles = data["ebook"]["titles"]
+    isbns = data["ebook"]["isbns"]
+    assert matching.match_key("Owned Book") in titles       # has a file -> owned
+    assert "1111111111111" in isbns
+    assert matching.match_key("Catalog Stub") not in titles  # no file -> excluded
+    assert "2222222222222" not in isbns
+    assert matching.match_key("Null Editions Stub") not in titles  # null editions -> excluded
 
 
 def test_availability_misconfigured_never_500(auth_client, monkeypatch):
